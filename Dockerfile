@@ -1,25 +1,20 @@
-FROM maven:3.9.9-eclipse-temurin-21-alpine AS build
+FROM eclipse-temurin:21-jre
 
-WORKDIR /workspace
+LABEL maintainer="chenximeng"
 
-COPY pom.xml .
-COPY src ./src
-
-RUN mvn -DskipTests package
-
-FROM eclipse-temurin:21-jre-alpine
+ENV TZ=Asia/Shanghai
+ENV JAVA_OPTS=""
 
 WORKDIR /app
 
-RUN addgroup -S app && adduser -S app -G app
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
+    && echo "$TZ" > /etc/timezone \
+    && useradd -r -u 10001 appuser
 
-ENV SPRING_PROFILES_ACTIVE=prod
-ENV JAVA_OPTS=""
-
-COPY --from=build /workspace/target/app.jar /app/app.jar
+COPY simon-ledger-api.jar /app/app.jar
 
 EXPOSE 18080
 
-USER app
+USER appuser
 
-ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar /app/app.jar"]
+ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar /app/app.jar --spring.profiles.active=prod"]
