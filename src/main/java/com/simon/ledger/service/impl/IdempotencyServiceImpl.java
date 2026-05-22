@@ -10,6 +10,7 @@ import com.simon.ledger.entity.IdempotencyRecord;
 import com.simon.ledger.mapper.IdempotencyRecordMapper;
 import com.simon.ledger.service.IdempotencyService;
 import lombok.RequiredArgsConstructor;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
@@ -20,6 +21,7 @@ import java.util.function.Supplier;
 @RequiredArgsConstructor
 public class IdempotencyServiceImpl implements IdempotencyService {
 
+    private static final int PROCESSING_CODE = -1;
     private static final int SUCCESS_CODE = 0;
 
     private final IdempotencyRecordMapper idempotencyRecordMapper;
@@ -37,9 +39,20 @@ public class IdempotencyServiceImpl implements IdempotencyService {
             return readResponse(exists, responseType);
         }
 
-        T response = supplier.get();
-        saveRecord(userId, key, method, path, response);
-        return response;
+        String requestKey = key.trim();
+        IdempotencyRecord record = processingRecord(userId, requestKey, method, path);
+        if (!tryInsert(record)) {
+            return readExisting(userId, requestKey, method, path, responseType);
+        }
+
+        try {
+            T response = supplier.get();
+            completeRecord(record, response);
+            return response;
+        } catch (RuntimeException e) {
+            deleteRecord(record);
+            throw e;
+        }
     }
 
     @Override
@@ -54,8 +67,21 @@ public class IdempotencyServiceImpl implements IdempotencyService {
             ensureSameRequest(exists, method, path);
             return;
         }
-        runnable.run();
-        saveRecord(userId, key, method, path, null);
+
+        String requestKey = key.trim();
+        IdempotencyRecord record = processingRecord(userId, requestKey, method, path);
+        if (!tryInsert(record)) {
+            readExisting(userId, requestKey, method, path, Void.class);
+            return;
+        }
+
+        try {
+            runnable.run();
+            completeRecord(record, null);
+        } catch (RuntimeException e) {
+            deleteRecord(record);
+            throw e;
+        }
     }
 
     private IdempotencyRecord existing(Long userId, String key) {
@@ -71,6 +97,9 @@ public class IdempotencyServiceImpl implements IdempotencyService {
     }
 
     private <T> T readResponse(IdempotencyRecord record, Class<T> responseType) {
+        if (PROCESSING_CODE == record.getResponseCode()) {
+            throw new BusinessException(ErrorCode.CONFLICT, "请求正在处理中，请稍后重试");
+        }
         if (!StringUtils.hasText(record.getResponseBody())) {
             return null;
         }
@@ -81,17 +110,47 @@ public class IdempotencyServiceImpl implements IdempotencyService {
         }
     }
 
-    private void saveRecord(Long userId, String key, String method, String path, Object response) {
+    private <T> T readExisting(Long userId, String key, String method, String path, Class<T> responseType) {
+        IdempotencyRecord exists = existing(userId, key);
+        if (exists == null) {
+            throw new BusinessException(ErrorCode.CONFLICT, "请求正在处理中，请稍后重试");
+        }
+        ensureSameRequest(exists, method, path);
+        return readResponse(exists, responseType);
+    }
+
+    private IdempotencyRecord processingRecord(Long userId, String key, String method, String path) {
         IdempotencyRecord record = new IdempotencyRecord();
         record.setUserId(userId);
-        record.setRequestKey(key.trim());
+        record.setRequestKey(key);
         record.setRequestMethod(method);
         record.setRequestPath(path);
-        record.setResponseCode(SUCCESS_CODE);
-        record.setResponseBody(writeResponse(response));
+        record.setResponseCode(PROCESSING_CODE);
+        record.setResponseBody(null);
         record.setCreatedAt(LocalDateTime.now());
         record.setExpiresAt(LocalDateTime.now().plusDays(30));
-        idempotencyRecordMapper.insert(record);
+        return record;
+    }
+
+    private boolean tryInsert(IdempotencyRecord record) {
+        try {
+            idempotencyRecordMapper.insert(record);
+            return true;
+        } catch (DuplicateKeyException e) {
+            return false;
+        }
+    }
+
+    private void completeRecord(IdempotencyRecord record, Object response) {
+        record.setResponseCode(SUCCESS_CODE);
+        record.setResponseBody(writeResponse(response));
+        idempotencyRecordMapper.updateById(record);
+    }
+
+    private void deleteRecord(IdempotencyRecord record) {
+        if (record.getId() != null) {
+            idempotencyRecordMapper.deleteById(record.getId());
+        }
     }
 
     private String writeResponse(Object response) {
