@@ -11,7 +11,7 @@ RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
     && echo "$TZ" > /etc/timezone \
     && useradd -r -u 10001 appuser
 
-COPY simon-ledger-api.jar /app/app.jar
+COPY app.jar /app/app.jar
 
 EXPOSE 18080
 
