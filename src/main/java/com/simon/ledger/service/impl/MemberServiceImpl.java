@@ -14,9 +14,11 @@ import com.simon.ledger.entity.UserAccount;
 import com.simon.ledger.mapper.LedgerMapper;
 import com.simon.ledger.mapper.LedgerMemberMapper;
 import com.simon.ledger.mapper.UserAccountMapper;
+import com.simon.ledger.service.ChangeLogService;
 import com.simon.ledger.service.MemberService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -32,6 +34,7 @@ public class MemberServiceImpl extends ServiceImpl<LedgerMemberMapper, LedgerMem
 
     private final LedgerMapper ledgerMapper;
     private final UserAccountMapper userAccountMapper;
+    private final ChangeLogService changeLogService;
 
     @Override
     public List<MemberResp> list(String ledgerUuid) {
@@ -48,6 +51,7 @@ public class MemberServiceImpl extends ServiceImpl<LedgerMemberMapper, LedgerMem
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public MemberResp updateRole(String ledgerUuid, String memberUuid, MemberRoleUpdateReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
         Ledger ledger = requireLedger(ledgerUuid);
@@ -66,10 +70,12 @@ public class MemberServiceImpl extends ServiceImpl<LedgerMemberMapper, LedgerMem
         }
         target.setRole(newRole);
         updateById(target);
+        changeLogService.record(ledger.getId(), "member", target.getUuid(), "update", userId);
         return toResp(target, userAccountMapper.selectById(target.getUserId()));
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public void remove(String ledgerUuid, String memberUuid) {
         Long userId = StpUtil.getLoginIdAsLong();
         Ledger ledger = requireLedger(ledgerUuid);
@@ -84,6 +90,7 @@ public class MemberServiceImpl extends ServiceImpl<LedgerMemberMapper, LedgerMem
         }
         target.setDeletedAt(LocalDateTime.now());
         updateById(target);
+        changeLogService.record(ledger.getId(), "member", target.getUuid(), "delete", userId);
     }
 
     private Ledger requireLedger(String ledgerUuid) {

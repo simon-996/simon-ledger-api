@@ -18,9 +18,11 @@ import com.simon.ledger.mapper.LedgerMapper;
 import com.simon.ledger.mapper.LedgerMemberMapper;
 import com.simon.ledger.mapper.LedgerPersonMapper;
 import com.simon.ledger.mapper.UserAccountMapper;
+import com.simon.ledger.service.ChangeLogService;
 import com.simon.ledger.service.PersonService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
@@ -40,6 +42,7 @@ public class PersonServiceImpl extends ServiceImpl<LedgerPersonMapper, LedgerPer
     private final LedgerMapper ledgerMapper;
     private final LedgerMemberMapper ledgerMemberMapper;
     private final UserAccountMapper userAccountMapper;
+    private final ChangeLogService changeLogService;
 
     @Override
     public List<PersonResp> list(String ledgerUuid) {
@@ -59,6 +62,7 @@ public class PersonServiceImpl extends ServiceImpl<LedgerPersonMapper, LedgerPer
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public PersonResp create(String ledgerUuid, PersonCreateReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
         Ledger ledger = requireLedger(ledgerUuid);
@@ -77,11 +81,13 @@ public class PersonServiceImpl extends ServiceImpl<LedgerPersonMapper, LedgerPer
         person.setName(req.getName().trim());
         person.setAvatar(normalizeAvatar(req.getAvatar()));
         save(person);
+        changeLogService.record(ledger.getId(), "person", person.getUuid(), "create", userId);
 
         return toResp(ledger, person, linkedUser);
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public PersonResp update(String ledgerUuid, String personUuid, PersonUpdateReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
         Ledger ledger = requireLedger(ledgerUuid);
@@ -98,11 +104,13 @@ public class PersonServiceImpl extends ServiceImpl<LedgerPersonMapper, LedgerPer
         person.setName(req.getName().trim());
         person.setAvatar(normalizeAvatar(req.getAvatar()));
         updateById(person);
+        changeLogService.record(ledger.getId(), "person", person.getUuid(), "update", userId);
 
         return toResp(ledger, person, linkedUser);
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public void delete(String ledgerUuid, String personUuid) {
         Long userId = StpUtil.getLoginIdAsLong();
         Ledger ledger = requireLedger(ledgerUuid);
@@ -112,6 +120,7 @@ public class PersonServiceImpl extends ServiceImpl<LedgerPersonMapper, LedgerPer
 
         person.setDeletedAt(LocalDateTime.now());
         updateById(person);
+        changeLogService.record(ledger.getId(), "person", person.getUuid(), "delete", userId);
     }
 
     private Ledger requireLedger(String ledgerUuid) {

@@ -28,6 +28,7 @@ import com.simon.ledger.mapper.LedgerPersonMapper;
 import com.simon.ledger.mapper.LedgerTransactionMapper;
 import com.simon.ledger.mapper.LedgerTransactionPersonMapper;
 import com.simon.ledger.mapper.UserAccountMapper;
+import com.simon.ledger.service.ChangeLogService;
 import com.simon.ledger.service.TransactionService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
@@ -56,6 +57,7 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
     private final LedgerPersonMapper ledgerPersonMapper;
     private final LedgerTransactionPersonMapper ledgerTransactionPersonMapper;
     private final UserAccountMapper userAccountMapper;
+    private final ChangeLogService changeLogService;
 
     @Override
     public PageResp<TransactionResp> list(String ledgerUuid, TransactionListReq req) {
@@ -107,6 +109,10 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
             throw new BusinessException(ErrorCode.FORBIDDEN);
         }
         validateType(req.getType());
+        LedgerTransaction exists = findByClientOperationId(ledger.getId(), userId, req.getClientOperationId());
+        if (exists != null) {
+            return toResp(ledger, exists, peopleByTransactionId(exists.getId(), true), userMap(List.of(exists)));
+        }
         List<LedgerPerson> people = requirePeople(ledger.getId(), req.getPersonUuids());
 
         LedgerTransaction transaction = new LedgerTransaction();
@@ -125,6 +131,7 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
         save(transaction);
 
         replacePeople(transaction.getId(), people);
+        changeLogService.record(ledger.getId(), "transaction", transaction.getUuid(), "create", userId);
         return toResp(ledger, transaction, people, userMap(List.of(transaction)));
     }
 
@@ -160,6 +167,7 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
         updateById(transaction);
 
         replacePeople(transaction.getId(), people);
+        changeLogService.record(ledger.getId(), "transaction", transaction.getUuid(), "update", userId);
         return toResp(ledger, transaction, people, userMap(List.of(transaction)));
     }
 
@@ -179,6 +187,19 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
         transaction.setLastModifiedByUserId(userId);
         transaction.setVersion(transaction.getVersion() + 1);
         updateById(transaction);
+        changeLogService.record(ledger.getId(), "transaction", transaction.getUuid(), "delete", userId);
+    }
+
+    private LedgerTransaction findByClientOperationId(Long ledgerId, Long userId, String clientOperationId) {
+        if (!StringUtils.hasText(clientOperationId)) {
+            return null;
+        }
+        return lambdaQuery()
+                .eq(LedgerTransaction::getLedgerId, ledgerId)
+                .eq(LedgerTransaction::getCreatedByUserId, userId)
+                .eq(LedgerTransaction::getClientOperationId, clientOperationId.trim())
+                .isNull(LedgerTransaction::getDeletedAt)
+                .one();
     }
 
     private Ledger requireLedger(String ledgerUuid) {

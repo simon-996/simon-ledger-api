@@ -16,6 +16,7 @@ import com.simon.ledger.entity.LedgerMember;
 import com.simon.ledger.mapper.LedgerInviteMapper;
 import com.simon.ledger.mapper.LedgerMapper;
 import com.simon.ledger.mapper.LedgerMemberMapper;
+import com.simon.ledger.service.ChangeLogService;
 import com.simon.ledger.service.InviteService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
@@ -31,8 +32,10 @@ public class InviteServiceImpl extends ServiceImpl<LedgerInviteMapper, LedgerInv
 
     private final LedgerMapper ledgerMapper;
     private final LedgerMemberMapper ledgerMemberMapper;
+    private final ChangeLogService changeLogService;
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public InviteResp create(String ledgerUuid, InviteCreateReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
         Ledger ledger = requireLedger(ledgerUuid);
@@ -94,12 +97,14 @@ public class InviteServiceImpl extends ServiceImpl<LedgerInviteMapper, LedgerInv
             member.setStatus(MEMBER_STATUS_ACTIVE);
             member.setJoinedAt(LocalDateTime.now());
             ledgerMemberMapper.insert(member);
+            changeLogService.record(ledger.getId(), "member", member.getUuid(), "create", userId);
         } else {
             exists.setRole(invite.getRole());
             exists.setStatus(MEMBER_STATUS_ACTIVE);
             exists.setJoinedAt(LocalDateTime.now());
             exists.setDeletedAt(null);
             ledgerMemberMapper.updateById(exists);
+            changeLogService.record(ledger.getId(), "member", exists.getUuid(), "update", userId);
         }
 
         invite.setUsedCount(invite.getUsedCount() + 1);

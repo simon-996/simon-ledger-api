@@ -7,6 +7,7 @@ import com.simon.ledger.dto.req.TransactionListReq;
 import com.simon.ledger.dto.req.TransactionUpdateReq;
 import com.simon.ledger.dto.resp.PageResp;
 import com.simon.ledger.dto.resp.TransactionResp;
+import com.simon.ledger.service.IdempotencyService;
 import com.simon.ledger.service.TransactionService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -19,6 +20,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -29,6 +31,7 @@ import org.springframework.web.bind.annotation.RestController;
 public class TransactionController {
 
     private final TransactionService transactionService;
+    private final IdempotencyService idempotencyService;
 
     @Operation(summary = "流水列表")
     @GetMapping
@@ -43,9 +46,16 @@ public class TransactionController {
     @PostMapping
     public Result<TransactionResp> create(
             @PathVariable String ledgerUuid,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
             @Valid @RequestBody TransactionCreateReq req
     ) {
-        return Result.ok(transactionService.create(ledgerUuid, req));
+        return Result.ok(idempotencyService.execute(
+                idempotencyKey,
+                "POST",
+                "/api/ledgers/" + ledgerUuid + "/transactions",
+                TransactionResp.class,
+                () -> transactionService.create(ledgerUuid, req)
+        ));
     }
 
     @Operation(summary = "流水详情")
@@ -62,9 +72,16 @@ public class TransactionController {
     public Result<TransactionResp> update(
             @PathVariable String ledgerUuid,
             @PathVariable String transactionUuid,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
             @Valid @RequestBody TransactionUpdateReq req
     ) {
-        return Result.ok(transactionService.update(ledgerUuid, transactionUuid, req));
+        return Result.ok(idempotencyService.execute(
+                idempotencyKey,
+                "PUT",
+                "/api/ledgers/" + ledgerUuid + "/transactions/" + transactionUuid,
+                TransactionResp.class,
+                () -> transactionService.update(ledgerUuid, transactionUuid, req)
+        ));
     }
 
     @Operation(summary = "删除流水")
@@ -72,9 +89,15 @@ public class TransactionController {
     public Result<Void> delete(
             @PathVariable String ledgerUuid,
             @PathVariable String transactionUuid,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
             @Valid @RequestBody TransactionDeleteReq req
     ) {
-        transactionService.delete(ledgerUuid, transactionUuid, req);
+        idempotencyService.executeVoid(
+                idempotencyKey,
+                "DELETE",
+                "/api/ledgers/" + ledgerUuid + "/transactions/" + transactionUuid,
+                () -> transactionService.delete(ledgerUuid, transactionUuid, req)
+        );
         return Result.ok();
     }
 }

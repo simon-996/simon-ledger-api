@@ -13,6 +13,7 @@ import com.simon.ledger.entity.Ledger;
 import com.simon.ledger.entity.LedgerMember;
 import com.simon.ledger.mapper.LedgerMapper;
 import com.simon.ledger.mapper.LedgerMemberMapper;
+import com.simon.ledger.service.ChangeLogService;
 import com.simon.ledger.service.LedgerService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
@@ -32,6 +33,7 @@ public class LedgerServiceImpl extends ServiceImpl<LedgerMapper, Ledger> impleme
     private static final int MEMBER_STATUS_ACTIVE = 1;
 
     private final LedgerMemberMapper ledgerMemberMapper;
+    private final ChangeLogService changeLogService;
 
     @Override
     public List<LedgerResp> listMine() {
@@ -76,6 +78,7 @@ public class LedgerServiceImpl extends ServiceImpl<LedgerMapper, Ledger> impleme
         member.setStatus(MEMBER_STATUS_ACTIVE);
         member.setJoinedAt(LocalDateTime.now());
         ledgerMemberMapper.insert(member);
+        changeLogService.record(ledger.getId(), "ledger", ledger.getUuid(), "create", userId);
 
         return toResp(ledger, LedgerRoles.OWNER);
     }
@@ -89,6 +92,7 @@ public class LedgerServiceImpl extends ServiceImpl<LedgerMapper, Ledger> impleme
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public LedgerResp update(String ledgerUuid, LedgerUpdateReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
         Ledger ledger = requireLedger(ledgerUuid);
@@ -101,10 +105,12 @@ public class LedgerServiceImpl extends ServiceImpl<LedgerMapper, Ledger> impleme
         ledger.setBaseCurrencyCode(req.getBaseCurrencyCode().trim().toUpperCase());
         ledger.setExchangeRateToCny(req.getExchangeRateToCny());
         updateById(ledger);
+        changeLogService.record(ledger.getId(), "ledger", ledger.getUuid(), "update", userId);
         return toResp(ledger, member.getRole());
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public void delete(String ledgerUuid) {
         Long userId = StpUtil.getLoginIdAsLong();
         Ledger ledger = requireLedger(ledgerUuid);
@@ -115,6 +121,7 @@ public class LedgerServiceImpl extends ServiceImpl<LedgerMapper, Ledger> impleme
 
         ledger.setDeletedAt(LocalDateTime.now());
         updateById(ledger);
+        changeLogService.record(ledger.getId(), "ledger", ledger.getUuid(), "delete", userId);
     }
 
     private List<LedgerMember> activeMembersByUserId(Long userId) {
