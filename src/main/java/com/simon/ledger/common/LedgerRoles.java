@@ -11,6 +11,7 @@ public final class LedgerRoles {
 
     private static final Set<String> MANAGE_LEDGER_ROLES = Set.of(OWNER, ADMIN);
     private static final Set<String> EDIT_TRANSACTION_ROLES = Set.of(OWNER, ADMIN, EDITOR);
+    private static final Set<String> JOINABLE_ROLES = Set.of(ADMIN, EDITOR, VIEWER);
 
     private LedgerRoles() {
     }
@@ -29,5 +30,9 @@ public final class LedgerRoles {
 
     public static boolean canEditAnyTransaction(String role) {
         return OWNER.equals(role) || ADMIN.equals(role);
+    }
+
+    public static boolean isValidJoinableRole(String role) {
+        return JOINABLE_ROLES.contains(role);
     }
 }
