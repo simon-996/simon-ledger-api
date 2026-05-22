@@ -1,0 +1,11 @@
+.git
+.gitignore
+.idea
+target
+logs
+*.log
+
+src/main/resources/application-dev.yml
+
+README.md
+sql
