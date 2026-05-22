@@ -1,0 +1,161 @@
+package com.simon.ledger.service.impl;
+
+import cn.dev33.satoken.stp.StpUtil;
+import cn.hutool.core.util.IdUtil;
+import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.simon.ledger.common.ErrorCode;
+import com.simon.ledger.common.LedgerRoles;
+import com.simon.ledger.common.exception.BusinessException;
+import com.simon.ledger.dto.req.LedgerCreateReq;
+import com.simon.ledger.dto.req.LedgerUpdateReq;
+import com.simon.ledger.dto.resp.LedgerResp;
+import com.simon.ledger.entity.Ledger;
+import com.simon.ledger.entity.LedgerMember;
+import com.simon.ledger.mapper.LedgerMapper;
+import com.simon.ledger.mapper.LedgerMemberMapper;
+import com.simon.ledger.service.LedgerService;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.time.LocalDateTime;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+
+@Service
+@RequiredArgsConstructor
+public class LedgerServiceImpl extends ServiceImpl<LedgerMapper, Ledger> implements LedgerService {
+
+    private static final int MEMBER_STATUS_ACTIVE = 1;
+
+    private final LedgerMemberMapper ledgerMemberMapper;
+
+    @Override
+    public List<LedgerResp> listMine() {
+        Long userId = StpUtil.getLoginIdAsLong();
+        List<LedgerMember> members = activeMembersByUserId(userId);
+        if (members.isEmpty()) {
+            return List.of();
+        }
+
+        Map<Long, LedgerMember> memberMap = members.stream()
+                .collect(Collectors.toMap(LedgerMember::getLedgerId, Function.identity(), (a, b) -> a));
+        List<Long> ledgerIds = members.stream().map(LedgerMember::getLedgerId).toList();
+
+        return lambdaQuery()
+                .in(Ledger::getId, ledgerIds)
+                .isNull(Ledger::getDeletedAt)
+                .list()
+                .stream()
+                .sorted(Comparator.comparing(Ledger::getUpdatedAt, Comparator.nullsLast(Comparator.naturalOrder())).reversed())
+                .map(ledger -> toResp(ledger, memberMap.get(ledger.getId()).getRole()))
+                .toList();
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public LedgerResp create(LedgerCreateReq req) {
+        Long userId = StpUtil.getLoginIdAsLong();
+
+        Ledger ledger = new Ledger();
+        ledger.setUuid(IdUtil.fastSimpleUUID());
+        ledger.setName(req.getName().trim());
+        ledger.setBaseCurrencyCode(req.getBaseCurrencyCode().trim().toUpperCase());
+        ledger.setExchangeRateToCny(req.getExchangeRateToCny());
+        ledger.setOwnerUserId(userId);
+        save(ledger);
+
+        LedgerMember member = new LedgerMember();
+        member.setUuid(IdUtil.fastSimpleUUID());
+        member.setLedgerId(ledger.getId());
+        member.setUserId(userId);
+        member.setRole(LedgerRoles.OWNER);
+        member.setStatus(MEMBER_STATUS_ACTIVE);
+        member.setJoinedAt(LocalDateTime.now());
+        ledgerMemberMapper.insert(member);
+
+        return toResp(ledger, LedgerRoles.OWNER);
+    }
+
+    @Override
+    public LedgerResp detail(String ledgerUuid) {
+        Long userId = StpUtil.getLoginIdAsLong();
+        Ledger ledger = requireLedger(ledgerUuid);
+        LedgerMember member = requireActiveMember(ledger.getId(), userId);
+        return toResp(ledger, member.getRole());
+    }
+
+    @Override
+    public LedgerResp update(String ledgerUuid, LedgerUpdateReq req) {
+        Long userId = StpUtil.getLoginIdAsLong();
+        Ledger ledger = requireLedger(ledgerUuid);
+        LedgerMember member = requireActiveMember(ledger.getId(), userId);
+        if (!LedgerRoles.canManageLedger(member.getRole())) {
+            throw new BusinessException(ErrorCode.FORBIDDEN);
+        }
+
+        ledger.setName(req.getName().trim());
+        ledger.setBaseCurrencyCode(req.getBaseCurrencyCode().trim().toUpperCase());
+        ledger.setExchangeRateToCny(req.getExchangeRateToCny());
+        updateById(ledger);
+        return toResp(ledger, member.getRole());
+    }
+
+    @Override
+    public void delete(String ledgerUuid) {
+        Long userId = StpUtil.getLoginIdAsLong();
+        Ledger ledger = requireLedger(ledgerUuid);
+        LedgerMember member = requireActiveMember(ledger.getId(), userId);
+        if (!LedgerRoles.isOwner(member.getRole())) {
+            throw new BusinessException(ErrorCode.FORBIDDEN);
+        }
+
+        ledger.setDeletedAt(LocalDateTime.now());
+        updateById(ledger);
+    }
+
+    private List<LedgerMember> activeMembersByUserId(Long userId) {
+        return ledgerMemberMapper.selectList(com.baomidou.mybatisplus.core.toolkit.Wrappers.<LedgerMember>lambdaQuery()
+                .eq(LedgerMember::getUserId, userId)
+                .eq(LedgerMember::getStatus, MEMBER_STATUS_ACTIVE)
+                .isNull(LedgerMember::getDeletedAt));
+    }
+
+    private Ledger requireLedger(String ledgerUuid) {
+        Ledger ledger = lambdaQuery()
+                .eq(Ledger::getUuid, ledgerUuid)
+                .isNull(Ledger::getDeletedAt)
+                .one();
+        if (ledger == null) {
+            throw new BusinessException(ErrorCode.NOT_FOUND, "账本不存在");
+        }
+        return ledger;
+    }
+
+    private LedgerMember requireActiveMember(Long ledgerId, Long userId) {
+        LedgerMember member = ledgerMemberMapper.selectOne(com.baomidou.mybatisplus.core.toolkit.Wrappers.<LedgerMember>lambdaQuery()
+                .eq(LedgerMember::getLedgerId, ledgerId)
+                .eq(LedgerMember::getUserId, userId)
+                .eq(LedgerMember::getStatus, MEMBER_STATUS_ACTIVE)
+                .isNull(LedgerMember::getDeletedAt));
+        if (member == null) {
+            throw new BusinessException(ErrorCode.FORBIDDEN);
+        }
+        return member;
+    }
+
+    private LedgerResp toResp(Ledger ledger, String role) {
+        LedgerResp resp = new LedgerResp();
+        resp.setUuid(ledger.getUuid());
+        resp.setName(ledger.getName());
+        resp.setBaseCurrencyCode(ledger.getBaseCurrencyCode());
+        resp.setExchangeRateToCny(ledger.getExchangeRateToCny());
+        resp.setRole(role);
+        resp.setCreatedAt(ledger.getCreatedAt());
+        resp.setUpdatedAt(ledger.getUpdatedAt());
+        return resp;
+    }
+}
