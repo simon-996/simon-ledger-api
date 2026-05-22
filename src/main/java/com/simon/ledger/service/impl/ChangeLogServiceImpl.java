@@ -16,6 +16,7 @@ import com.simon.ledger.mapper.LedgerMemberMapper;
 import com.simon.ledger.mapper.UserAccountMapper;
 import com.simon.ledger.service.ChangeLogService;
 import lombok.RequiredArgsConstructor;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
@@ -30,6 +31,7 @@ import java.util.stream.Collectors;
 public class ChangeLogServiceImpl implements ChangeLogService {
 
     private static final int MEMBER_STATUS_ACTIVE = 1;
+    private static final int MAX_RECORD_RETRY = 3;
 
     private final LedgerChangeLogMapper ledgerChangeLogMapper;
     private final LedgerMapper ledgerMapper;
@@ -38,6 +40,19 @@ public class ChangeLogServiceImpl implements ChangeLogService {
 
     @Override
     public void record(Long ledgerId, String entityType, String entityUuid, String operation, Long operatorUserId) {
+        for (int i = 0; i < MAX_RECORD_RETRY; i++) {
+            try {
+                doRecord(ledgerId, entityType, entityUuid, operation, operatorUserId);
+                return;
+            } catch (DuplicateKeyException e) {
+                if (i == MAX_RECORD_RETRY - 1) {
+                    throw e;
+                }
+            }
+        }
+    }
+
+    private void doRecord(Long ledgerId, String entityType, String entityUuid, String operation, Long operatorUserId) {
         Integer maxVersion = ledgerChangeLogMapper.selectList(Wrappers.<LedgerChangeLog>lambdaQuery()
                         .eq(LedgerChangeLog::getLedgerId, ledgerId))
                 .stream()

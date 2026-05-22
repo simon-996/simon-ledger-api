@@ -3,6 +3,7 @@ package com.simon.ledger.service.impl;
 import cn.dev33.satoken.stp.StpUtil;
 import cn.hutool.core.util.IdUtil;
 import cn.hutool.core.util.RandomUtil;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.simon.ledger.common.ErrorCode;
@@ -107,9 +108,22 @@ public class InviteServiceImpl extends ServiceImpl<LedgerInviteMapper, LedgerInv
             changeLogService.record(ledger.getId(), "member", exists.getUuid(), "update", userId);
         }
 
-        invite.setUsedCount(invite.getUsedCount() + 1);
-        updateById(invite);
+        incrementInviteUsage(invite);
         return toResp(invite, ledger);
+    }
+
+    private void incrementInviteUsage(LedgerInvite invite) {
+        int oldUsedCount = invite.getUsedCount();
+        LambdaUpdateWrapper<LedgerInvite> wrapper = Wrappers.<LedgerInvite>lambdaUpdate()
+                .eq(LedgerInvite::getId, invite.getId())
+                .isNull(LedgerInvite::getDisabledAt)
+                .gt(LedgerInvite::getExpiresAt, LocalDateTime.now())
+                .apply("(max_uses IS NULL OR used_count < max_uses)")
+                .setSql("used_count = used_count + 1");
+        if (baseMapper.update(null, wrapper) != 1) {
+            throw new BusinessException(ErrorCode.CONFLICT, "邀请码状态已变化，请重试");
+        }
+        invite.setUsedCount(oldUsedCount + 1);
     }
 
     private Ledger requireLedger(String ledgerUuid) {
