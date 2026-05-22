@@ -1,0 +1,29 @@
+spring:
+  profiles:
+    active: dev
+  main:
+    allow-bean-definition-overriding: true
+  jackson:
+    time-zone: GMT+8
+
+mybatis-plus:
+  mapper-locations: classpath:mapper/*xml
+  type-aliases-package: com.simon.ledger.entity
+  configuration:
+    default-statement-timeout: 25000
+
+sa-token:
+  token-name: simon-ledger
+  timeout: -1
+  active-timeout: -1
+  is-concurrent: true
+  is-share: true
+  token-style: uuid
+  is-read-header: true
+  is-read-cookie: false
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
