@@ -20,6 +20,8 @@ public class TransactionUpdateReq {
     @NotNull(message = "流水类型不能为空")
     private Integer type;
 
+    private String payerPersonUuid;
+
     @NotNull(message = "金额不能为空")
     @DecimalMin(value = "0.01", message = "金额必须大于 0")
     private BigDecimal amount;

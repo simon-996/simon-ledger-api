@@ -23,6 +23,8 @@ public class LedgerTransaction {
 
     private Integer type;
 
+    private Long payerPersonId;
+
     private BigDecimal amount;
 
     private String currencyCode;

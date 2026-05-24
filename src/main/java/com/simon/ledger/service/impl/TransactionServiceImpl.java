@@ -114,11 +114,13 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
             return toResp(ledger, exists, peopleByTransactionId(exists.getId(), true), userMap(List.of(exists)));
         }
         List<LedgerPerson> people = requirePeople(ledger.getId(), req.getPersonUuids());
+        LedgerPerson payer = resolvePayer(ledger.getId(), req.getType(), req.getPayerPersonUuid());
 
         LedgerTransaction transaction = new LedgerTransaction();
         transaction.setUuid(IdUtil.fastSimpleUUID());
         transaction.setLedgerId(ledger.getId());
         transaction.setType(req.getType());
+        transaction.setPayerPersonId(payer == null ? null : payer.getId());
         transaction.setAmount(req.getAmount());
         transaction.setCurrencyCode(req.getCurrencyCode().trim().toUpperCase());
         transaction.setCategory(req.getCategory().trim());
@@ -155,8 +157,10 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
         requireCurrentVersion(transaction, req.getVersion());
         validateType(req.getType());
         List<LedgerPerson> people = requirePeople(ledger.getId(), req.getPersonUuids());
+        LedgerPerson payer = resolvePayer(ledger.getId(), req.getType(), req.getPayerPersonUuid());
 
         transaction.setType(req.getType());
+        transaction.setPayerPersonId(payer == null ? null : payer.getId());
         transaction.setAmount(req.getAmount());
         transaction.setCurrencyCode(req.getCurrencyCode().trim().toUpperCase());
         transaction.setCategory(req.getCategory().trim());
@@ -269,6 +273,13 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
         return people;
     }
 
+    private LedgerPerson resolvePayer(Long ledgerId, Integer type, String payerPersonUuid) {
+        if (!Objects.equals(TYPE_EXPENSE, type) || !StringUtils.hasText(payerPersonUuid)) {
+            return null;
+        }
+        return requirePerson(ledgerId, payerPersonUuid.trim(), false);
+    }
+
     private void replacePeople(Long transactionId, List<LedgerPerson> people) {
         ledgerTransactionPersonMapper.delete(Wrappers.<LedgerTransactionPerson>lambdaQuery()
                 .eq(LedgerTransactionPerson::getTransactionId, transactionId));
@@ -329,9 +340,10 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
     private List<TransactionResp> toRespList(Ledger ledger, List<LedgerTransaction> transactions) {
         List<Long> transactionIds = transactions.stream().map(LedgerTransaction::getId).toList();
         Map<Long, List<LedgerPerson>> peopleMap = peopleMapByTransactionIds(transactionIds);
+        Map<Long, String> payerPersonUuidMap = payerPersonUuidMap(transactions);
         Map<Long, UserAccount> userMap = userMap(transactions);
         return transactions.stream()
-                .map(transaction -> toResp(ledger, transaction, peopleMap.getOrDefault(transaction.getId(), List.of()), userMap))
+                .map(transaction -> toResp(ledger, transaction, peopleMap.getOrDefault(transaction.getId(), List.of()), userMap, payerPersonUuidMap))
                 .toList();
     }
 
@@ -341,10 +353,21 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
             List<LedgerPerson> people,
             Map<Long, UserAccount> userMap
     ) {
+        return toResp(ledger, transaction, people, userMap, payerPersonUuidMap(List.of(transaction)));
+    }
+
+    private TransactionResp toResp(
+            Ledger ledger,
+            LedgerTransaction transaction,
+            List<LedgerPerson> people,
+            Map<Long, UserAccount> userMap,
+            Map<Long, String> payerPersonUuidMap
+    ) {
         TransactionResp resp = new TransactionResp();
         resp.setUuid(transaction.getUuid());
         resp.setLedgerUuid(ledger.getUuid());
         resp.setType(transaction.getType());
+        resp.setPayerPersonUuid(payerPersonUuidMap.get(transaction.getPayerPersonId()));
         resp.setAmount(transaction.getAmount());
         resp.setCurrencyCode(transaction.getCurrencyCode());
         resp.setCategory(transaction.getCategory());
@@ -377,6 +400,20 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
     private String userUuid(Map<Long, UserAccount> userMap, Long userId) {
         UserAccount user = userMap.get(userId);
         return user == null ? null : user.getUuid();
+    }
+
+    private Map<Long, String> payerPersonUuidMap(List<LedgerTransaction> transactions) {
+        List<Long> payerPersonIds = transactions.stream()
+                .map(LedgerTransaction::getPayerPersonId)
+                .filter(Objects::nonNull)
+                .distinct()
+                .toList();
+        if (payerPersonIds.isEmpty()) {
+            return Map.of();
+        }
+        return ledgerPersonMapper.selectList(Wrappers.<LedgerPerson>lambdaQuery().in(LedgerPerson::getId, payerPersonIds))
+                .stream()
+                .collect(Collectors.toMap(LedgerPerson::getId, LedgerPerson::getUuid, (a, b) -> a));
     }
 
     private void requireEditPermission(LedgerMember member, LedgerTransaction transaction, Long userId) {

@@ -15,6 +15,8 @@ public class TransactionResp {
 
     private Integer type;
 
+    private String payerPersonUuid;
+
     private BigDecimal amount;
 
     private String currencyCode;

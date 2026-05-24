@@ -72,6 +72,8 @@ public class PersonServiceImpl extends ServiceImpl<LedgerPersonMapper, LedgerPer
         UserAccount linkedUser = findLinkedUser(req.getLinkedUserUuid());
         if (linkedUser != null) {
             ensureLinkedUserNotBound(ledger.getId(), linkedUser.getId(), null);
+        } else {
+            ensureManualNameNotUsed(ledger.getId(), req.getName(), null);
         }
 
         LedgerPerson person = new LedgerPerson();
@@ -98,6 +100,8 @@ public class PersonServiceImpl extends ServiceImpl<LedgerPersonMapper, LedgerPer
         UserAccount linkedUser = findLinkedUser(req.getLinkedUserUuid());
         if (linkedUser != null) {
             ensureLinkedUserNotBound(ledger.getId(), linkedUser.getId(), person.getId());
+        } else {
+            ensureManualNameNotUsed(ledger.getId(), req.getName(), person.getId());
         }
 
         person.setLinkedUserId(linkedUser == null ? null : linkedUser.getId());
@@ -184,6 +188,19 @@ public class PersonServiceImpl extends ServiceImpl<LedgerPersonMapper, LedgerPer
                 .one();
         if (exists != null && !Objects.equals(exists.getId(), currentPersonId)) {
             throw new BusinessException(ErrorCode.BAD_REQUEST, "该用户已绑定到账本参与人");
+        }
+    }
+
+    private void ensureManualNameNotUsed(Long ledgerId, String name, Long currentPersonId) {
+        String normalizedName = name == null ? "" : name.trim();
+        LedgerPerson exists = lambdaQuery()
+                .eq(LedgerPerson::getLedgerId, ledgerId)
+                .isNull(LedgerPerson::getLinkedUserId)
+                .eq(LedgerPerson::getName, normalizedName)
+                .isNull(LedgerPerson::getDeletedAt)
+                .one();
+        if (exists != null && !Objects.equals(exists.getId(), currentPersonId)) {
+            throw new BusinessException(ErrorCode.BAD_REQUEST, "手动参与人名称不能重复");
         }
     }
 

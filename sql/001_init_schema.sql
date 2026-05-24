@@ -96,6 +96,7 @@ CREATE TABLE IF NOT EXISTS ledger_transaction
     uuid                     VARCHAR(64)    NOT NULL,
     ledger_id                BIGINT         NOT NULL,
     type                     TINYINT        NOT NULL COMMENT '0 expense, 1 income',
+    payer_person_id          BIGINT         NULL COMMENT 'expense payer person id, null means shared pool',
     amount                   DECIMAL(18, 2) NOT NULL,
     currency_code            VARCHAR(16)    NOT NULL,
     category                 VARCHAR(64)    NOT NULL,
@@ -111,12 +112,14 @@ CREATE TABLE IF NOT EXISTS ledger_transaction
     UNIQUE KEY uk_ledger_transaction_uuid (uuid),
     KEY idx_ledger_transaction_ledger_happened_at (ledger_id, happened_at),
     KEY idx_ledger_transaction_ledger_type (ledger_id, type),
+    KEY idx_ledger_transaction_payer_person_id (payer_person_id),
     KEY idx_ledger_transaction_ledger_category (ledger_id, category),
     KEY idx_ledger_transaction_created_by_user_id (created_by_user_id),
     KEY idx_ledger_transaction_last_modified_by_user_id (last_modified_by_user_id),
     KEY idx_ledger_transaction_client_operation_id (client_operation_id),
     KEY idx_ledger_transaction_deleted_at (deleted_at),
     CONSTRAINT fk_ledger_transaction_ledger_id FOREIGN KEY (ledger_id) REFERENCES ledger (id),
+    CONSTRAINT fk_ledger_transaction_payer_person_id FOREIGN KEY (payer_person_id) REFERENCES ledger_person (id),
     CONSTRAINT fk_ledger_transaction_created_by_user_id FOREIGN KEY (created_by_user_id) REFERENCES user_account (id),
     CONSTRAINT fk_ledger_transaction_last_modified_by_user_id FOREIGN KEY (last_modified_by_user_id) REFERENCES user_account (id)
 ) ENGINE = InnoDB

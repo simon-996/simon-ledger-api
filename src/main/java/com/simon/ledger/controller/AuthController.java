@@ -2,6 +2,7 @@ package com.simon.ledger.controller;
 
 import com.simon.ledger.common.Result;
 import com.simon.ledger.dto.req.AuthLoginReq;
+import com.simon.ledger.dto.req.AuthProfileUpdateReq;
 import com.simon.ledger.dto.req.AuthRegisterReq;
 import com.simon.ledger.dto.resp.AuthLoginResp;
 import com.simon.ledger.dto.resp.AuthUserResp;
@@ -12,6 +13,7 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -47,5 +49,11 @@ public class AuthController {
     @GetMapping("/me")
     public Result<AuthUserResp> me() {
         return Result.ok(authService.me());
+    }
+
+    @Operation(summary = "更新当前用户资料")
+    @PutMapping("/me")
+    public Result<AuthUserResp> updateProfile(@Valid @RequestBody AuthProfileUpdateReq req) {
+        return Result.ok(authService.updateProfile(req));
     }
 }

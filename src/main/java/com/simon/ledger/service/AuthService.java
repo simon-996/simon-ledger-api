@@ -1,6 +1,7 @@
 package com.simon.ledger.service;
 
 import com.simon.ledger.dto.req.AuthLoginReq;
+import com.simon.ledger.dto.req.AuthProfileUpdateReq;
 import com.simon.ledger.dto.req.AuthRegisterReq;
 import com.simon.ledger.dto.resp.AuthLoginResp;
 import com.simon.ledger.dto.resp.AuthUserResp;
@@ -14,4 +15,6 @@ public interface AuthService {
     void logout();
 
     AuthUserResp me();
+
+    AuthUserResp updateProfile(AuthProfileUpdateReq req);
 }

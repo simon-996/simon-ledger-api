@@ -96,7 +96,7 @@ public class StatsServiceImpl implements StatsService {
         Ledger ledger = requireLedgerAndMember(ledgerUuid, userId);
         List<LedgerTransaction> transactions = transactions(ledger.getId());
         Map<Long, List<Long>> transactionPersonIds = transactionPersonIds(transactions);
-        Map<Long, LedgerPerson> personMap = personMap(transactionPersonIds);
+        Map<Long, LedgerPerson> personMap = personMap(transactionPersonIds, transactions);
         Map<Long, MutableBalance> balanceMap = new LinkedHashMap<>();
 
         for (LedgerTransaction transaction : transactions) {
@@ -107,12 +107,21 @@ public class StatsServiceImpl implements StatsService {
                 continue;
             }
             BigDecimal splitAmount = transaction.getAmount().divide(BigDecimal.valueOf(personIds.size()), 2, RoundingMode.HALF_UP);
-            for (Long personId : personIds) {
-                MutableBalance balance = balanceMap.computeIfAbsent(personId, ignored -> new MutableBalance());
-                if (Objects.equals(transaction.getType(), TYPE_EXPENSE)) {
+            if (Objects.equals(transaction.getType(), TYPE_EXPENSE) && transaction.getPayerPersonId() != null) {
+                MutableBalance payerBalance = balanceMap.computeIfAbsent(transaction.getPayerPersonId(), ignored -> new MutableBalance());
+                payerBalance.income = payerBalance.income.add(transaction.getAmount());
+                for (Long personId : personIds) {
+                    MutableBalance balance = balanceMap.computeIfAbsent(personId, ignored -> new MutableBalance());
                     balance.expense = balance.expense.add(splitAmount);
-                } else if (Objects.equals(transaction.getType(), TYPE_INCOME)) {
-                    balance.income = balance.income.add(splitAmount);
+                }
+            } else {
+                for (Long personId : personIds) {
+                    MutableBalance balance = balanceMap.computeIfAbsent(personId, ignored -> new MutableBalance());
+                    if (Objects.equals(transaction.getType(), TYPE_EXPENSE)) {
+                        balance.expense = balance.expense.add(splitAmount);
+                    } else if (Objects.equals(transaction.getType(), TYPE_INCOME)) {
+                        balance.income = balance.income.add(splitAmount);
+                    }
                 }
             }
         }
@@ -180,9 +189,20 @@ public class StatsServiceImpl implements StatsService {
                 ));
     }
 
-    private Map<Long, LedgerPerson> personMap(Map<Long, List<Long>> transactionPersonIds) {
+    private Map<Long, LedgerPerson> personMap(
+            Map<Long, List<Long>> transactionPersonIds,
+            List<LedgerTransaction> transactions
+    ) {
         List<Long> personIds = transactionPersonIds.values().stream()
                 .flatMap(List::stream)
+                .collect(Collectors.toSet())
+                .stream()
+                .toList();
+        List<Long> payerPersonIds = transactions.stream()
+                .map(LedgerTransaction::getPayerPersonId)
+                .filter(Objects::nonNull)
+                .toList();
+        personIds = java.util.stream.Stream.concat(personIds.stream(), payerPersonIds.stream())
                 .distinct()
                 .toList();
         if (personIds.isEmpty()) {

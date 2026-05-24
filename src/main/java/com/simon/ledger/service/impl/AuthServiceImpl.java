@@ -7,6 +7,7 @@ import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.simon.ledger.common.ErrorCode;
 import com.simon.ledger.common.exception.BusinessException;
 import com.simon.ledger.dto.req.AuthLoginReq;
+import com.simon.ledger.dto.req.AuthProfileUpdateReq;
 import com.simon.ledger.dto.req.AuthRegisterReq;
 import com.simon.ledger.dto.resp.AuthLoginResp;
 import com.simon.ledger.dto.resp.AuthUserResp;
@@ -86,6 +87,23 @@ public class AuthServiceImpl extends ServiceImpl<UserAccountMapper, UserAccount>
         if (STATUS_DISABLED == user.getStatus()) {
             throw new BusinessException(ErrorCode.FORBIDDEN, "账号已禁用");
         }
+        return toUserResp(user);
+    }
+
+    @Override
+    public AuthUserResp updateProfile(AuthProfileUpdateReq req) {
+        Long userId = StpUtil.getLoginIdAsLong();
+        UserAccount user = getById(userId);
+        if (user == null || user.getDeletedAt() != null) {
+            throw new BusinessException(ErrorCode.UNAUTHORIZED);
+        }
+        if (STATUS_DISABLED == user.getStatus()) {
+            throw new BusinessException(ErrorCode.FORBIDDEN, "账号已禁用");
+        }
+
+        user.setNickname(req.getNickname().trim());
+        user.setAvatar(normalize(req.getAvatar()));
+        updateById(user);
         return toUserResp(user);
     }
 
