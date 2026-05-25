@@ -57,7 +57,7 @@ public class PersonServiceImpl extends ServiceImpl<LedgerPersonMapper, LedgerPer
                 .list();
         Map<Long, UserAccount> linkedUserMap = linkedUserMap(people);
         return people.stream()
-                .map(person -> toResp(ledger, person, linkedUserMap.get(person.getLinkedUserId())))
+                .map(person -> toResp(ledger, person, linkedUser(person, linkedUserMap)))
                 .toList();
     }
 
@@ -217,6 +217,14 @@ public class PersonServiceImpl extends ServiceImpl<LedgerPersonMapper, LedgerPer
                         .in(UserAccount::getId, userIds))
                 .stream()
                 .collect(Collectors.toMap(UserAccount::getId, Function.identity(), (a, b) -> a));
+    }
+
+    private UserAccount linkedUser(LedgerPerson person, Map<Long, UserAccount> linkedUserMap) {
+        Long linkedUserId = person.getLinkedUserId();
+        if (linkedUserId == null) {
+            return null;
+        }
+        return linkedUserMap.get(linkedUserId);
     }
 
     private PersonResp toResp(Ledger ledger, LedgerPerson person, UserAccount linkedUser) {
