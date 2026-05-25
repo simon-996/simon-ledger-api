@@ -367,7 +367,7 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
         resp.setUuid(transaction.getUuid());
         resp.setLedgerUuid(ledger.getUuid());
         resp.setType(transaction.getType());
-        resp.setPayerPersonUuid(payerPersonUuidMap.get(transaction.getPayerPersonId()));
+        resp.setPayerPersonUuid(payerPersonUuid(transaction, payerPersonUuidMap));
         resp.setAmount(transaction.getAmount());
         resp.setCurrencyCode(transaction.getCurrencyCode());
         resp.setCategory(transaction.getCategory());
@@ -414,6 +414,14 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
         return ledgerPersonMapper.selectList(Wrappers.<LedgerPerson>lambdaQuery().in(LedgerPerson::getId, payerPersonIds))
                 .stream()
                 .collect(Collectors.toMap(LedgerPerson::getId, LedgerPerson::getUuid, (a, b) -> a));
+    }
+
+    private String payerPersonUuid(LedgerTransaction transaction, Map<Long, String> payerPersonUuidMap) {
+        Long payerPersonId = transaction.getPayerPersonId();
+        if (payerPersonId == null) {
+            return null;
+        }
+        return payerPersonUuidMap.get(payerPersonId);
     }
 
     private void requireEditPermission(LedgerMember member, LedgerTransaction transaction, Long userId) {

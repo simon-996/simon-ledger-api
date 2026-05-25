@@ -3,6 +3,7 @@ package com.simon.ledger.service.impl;
 import cn.dev33.satoken.stp.StpUtil;
 import cn.hutool.core.util.IdUtil;
 import cn.hutool.crypto.digest.BCrypt;
+import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.simon.ledger.common.ErrorCode;
 import com.simon.ledger.common.exception.BusinessException;
@@ -11,17 +12,28 @@ import com.simon.ledger.dto.req.AuthProfileUpdateReq;
 import com.simon.ledger.dto.req.AuthRegisterReq;
 import com.simon.ledger.dto.resp.AuthLoginResp;
 import com.simon.ledger.dto.resp.AuthUserResp;
+import com.simon.ledger.entity.LedgerPerson;
 import com.simon.ledger.entity.UserAccount;
+import com.simon.ledger.mapper.LedgerPersonMapper;
 import com.simon.ledger.mapper.UserAccountMapper;
 import com.simon.ledger.service.AuthService;
+import com.simon.ledger.service.ChangeLogService;
+import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
+import java.util.List;
+
 @Service
+@RequiredArgsConstructor
 public class AuthServiceImpl extends ServiceImpl<UserAccountMapper, UserAccount> implements AuthService {
 
     private static final int STATUS_NORMAL = 1;
     private static final int STATUS_DISABLED = 2;
+
+    private final LedgerPersonMapper ledgerPersonMapper;
+    private final ChangeLogService changeLogService;
 
     @Override
     public AuthUserResp register(AuthRegisterReq req) {
@@ -91,6 +103,7 @@ public class AuthServiceImpl extends ServiceImpl<UserAccountMapper, UserAccount>
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public AuthUserResp updateProfile(AuthProfileUpdateReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
         UserAccount user = getById(userId);
@@ -104,7 +117,20 @@ public class AuthServiceImpl extends ServiceImpl<UserAccountMapper, UserAccount>
         user.setNickname(req.getNickname().trim());
         user.setAvatar(normalize(req.getAvatar()));
         updateById(user);
+        syncLinkedPeople(userId, user);
         return toUserResp(user);
+    }
+
+    private void syncLinkedPeople(Long userId, UserAccount user) {
+        List<LedgerPerson> people = ledgerPersonMapper.selectList(Wrappers.<LedgerPerson>lambdaQuery()
+                .eq(LedgerPerson::getLinkedUserId, userId)
+                .isNull(LedgerPerson::getDeletedAt));
+        for (LedgerPerson person : people) {
+            person.setName(user.getNickname());
+            person.setAvatar(user.getAvatar() == null ? "" : user.getAvatar());
+            ledgerPersonMapper.updateById(person);
+            changeLogService.record(person.getLedgerId(), "person", person.getUuid(), "update", userId);
+        }
     }
 
     private boolean existsByEmail(String email) {

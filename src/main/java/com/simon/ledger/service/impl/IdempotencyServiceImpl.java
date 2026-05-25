@@ -23,6 +23,7 @@ public class IdempotencyServiceImpl implements IdempotencyService {
 
     private static final int PROCESSING_CODE = -1;
     private static final int SUCCESS_CODE = 0;
+    private static final int MAX_REQUEST_KEY_LENGTH = 128;
 
     private final IdempotencyRecordMapper idempotencyRecordMapper;
     private final ObjectMapper objectMapper;
@@ -32,14 +33,14 @@ public class IdempotencyServiceImpl implements IdempotencyService {
         if (!StringUtils.hasText(key)) {
             return supplier.get();
         }
+        String requestKey = normalizeRequestKey(key);
         Long userId = StpUtil.getLoginIdAsLong();
-        IdempotencyRecord exists = existing(userId, key);
+        IdempotencyRecord exists = existing(userId, requestKey);
         if (exists != null) {
             ensureSameRequest(exists, method, path);
             return readResponse(exists, responseType);
         }
 
-        String requestKey = key.trim();
         IdempotencyRecord record = processingRecord(userId, requestKey, method, path);
         if (!tryInsert(record)) {
             return readExisting(userId, requestKey, method, path, responseType);
@@ -61,14 +62,14 @@ public class IdempotencyServiceImpl implements IdempotencyService {
             runnable.run();
             return;
         }
+        String requestKey = normalizeRequestKey(key);
         Long userId = StpUtil.getLoginIdAsLong();
-        IdempotencyRecord exists = existing(userId, key);
+        IdempotencyRecord exists = existing(userId, requestKey);
         if (exists != null) {
             ensureSameRequest(exists, method, path);
             return;
         }
 
-        String requestKey = key.trim();
         IdempotencyRecord record = processingRecord(userId, requestKey, method, path);
         if (!tryInsert(record)) {
             readExisting(userId, requestKey, method, path, Void.class);
@@ -87,7 +88,15 @@ public class IdempotencyServiceImpl implements IdempotencyService {
     private IdempotencyRecord existing(Long userId, String key) {
         return idempotencyRecordMapper.selectOne(Wrappers.<IdempotencyRecord>lambdaQuery()
                 .eq(IdempotencyRecord::getUserId, userId)
-                .eq(IdempotencyRecord::getRequestKey, key.trim()));
+                .eq(IdempotencyRecord::getRequestKey, key));
+    }
+
+    private String normalizeRequestKey(String key) {
+        String requestKey = key.trim();
+        if (requestKey.length() > MAX_REQUEST_KEY_LENGTH) {
+            throw new BusinessException(ErrorCode.BAD_REQUEST, "Idempotency-Key 不能超过 128 个字符");
+        }
+        return requestKey;
     }
 
     private void ensureSameRequest(IdempotencyRecord record, String method, String path) {
