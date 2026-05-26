@@ -26,6 +26,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -59,6 +60,57 @@ public class PersonServiceImpl extends ServiceImpl<LedgerPersonMapper, LedgerPer
         return people.stream()
                 .map(person -> toResp(ledger, person, linkedUser(person, linkedUserMap)))
                 .toList();
+    }
+
+    @Override
+    public Map<String, List<PersonResp>> batchList(String ledgerUuids) {
+        Long userId = StpUtil.getLoginIdAsLong();
+        List<String> normalizedUuids = parseLedgerUuids(ledgerUuids);
+        if (normalizedUuids.isEmpty()) {
+            return Map.of();
+        }
+
+        List<Ledger> ledgers = ledgerMapper.selectList(Wrappers.<Ledger>lambdaQuery()
+                .in(Ledger::getUuid, normalizedUuids)
+                .isNull(Ledger::getDeletedAt));
+        Map<String, Ledger> ledgerMap = ledgers.stream()
+                .collect(Collectors.toMap(Ledger::getUuid, Function.identity(), (a, b) -> a));
+        if (ledgerMap.size() != normalizedUuids.size()) {
+            throw new BusinessException(ErrorCode.NOT_FOUND, "账本不存在");
+        }
+
+        List<Long> ledgerIds = ledgers.stream().map(Ledger::getId).toList();
+        List<LedgerMember> activeMembers = ledgerMemberMapper.selectList(Wrappers.<LedgerMember>lambdaQuery()
+                .in(LedgerMember::getLedgerId, ledgerIds)
+                .eq(LedgerMember::getUserId, userId)
+                .eq(LedgerMember::getStatus, MEMBER_STATUS_ACTIVE)
+                .isNull(LedgerMember::getDeletedAt));
+        if (activeMembers.size() != normalizedUuids.size()) {
+            throw new BusinessException(ErrorCode.FORBIDDEN);
+        }
+
+        List<LedgerPerson> people = lambdaQuery()
+                .in(LedgerPerson::getLedgerId, ledgerIds)
+                .isNull(LedgerPerson::getDeletedAt)
+                .orderByAsc(LedgerPerson::getCreatedAt)
+                .list();
+        Map<Long, Ledger> ledgerById = ledgers.stream()
+                .collect(Collectors.toMap(Ledger::getId, Function.identity(), (a, b) -> a));
+        Map<Long, List<LedgerPerson>> peopleByLedgerId = people.stream()
+                .collect(Collectors.groupingBy(LedgerPerson::getLedgerId));
+        Map<Long, UserAccount> linkedUserMap = linkedUserMap(people);
+
+        Map<String, List<PersonResp>> result = new LinkedHashMap<>();
+        for (String ledgerUuid : normalizedUuids) {
+            Ledger ledger = ledgerMap.get(ledgerUuid);
+            List<PersonResp> ledgerPeople = peopleByLedgerId
+                    .getOrDefault(ledger.getId(), List.of())
+                    .stream()
+                    .map(person -> toResp(ledgerById.get(person.getLedgerId()), person, linkedUser(person, linkedUserMap)))
+                    .toList();
+            result.put(ledgerUuid, ledgerPeople);
+        }
+        return result;
     }
 
     @Override
@@ -135,6 +187,18 @@ public class PersonServiceImpl extends ServiceImpl<LedgerPersonMapper, LedgerPer
             throw new BusinessException(ErrorCode.NOT_FOUND, "账本不存在");
         }
         return ledger;
+    }
+
+    private List<String> parseLedgerUuids(String ledgerUuids) {
+        if (!StringUtils.hasText(ledgerUuids)) {
+            return List.of();
+        }
+        return List.of(ledgerUuids.split(","))
+                .stream()
+                .map(String::trim)
+                .filter(StringUtils::hasText)
+                .distinct()
+                .toList();
     }
 
     private LedgerMember requireActiveMember(Long ledgerId, Long userId) {
