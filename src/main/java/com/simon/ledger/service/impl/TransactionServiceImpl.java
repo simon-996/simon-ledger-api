@@ -373,7 +373,11 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
         resp.setCategory(transaction.getCategory());
         resp.setNote(transaction.getNote());
         resp.setCreatedByUserUuid(userUuid(userMap, transaction.getCreatedByUserId()));
+        resp.setCreatedByNickname(userNickname(userMap, transaction.getCreatedByUserId()));
+        resp.setCreatedByAvatar(userAvatar(userMap, transaction.getCreatedByUserId()));
         resp.setLastModifiedByUserUuid(userUuid(userMap, transaction.getLastModifiedByUserId()));
+        resp.setLastModifiedByNickname(userNickname(userMap, transaction.getLastModifiedByUserId()));
+        resp.setLastModifiedByAvatar(userAvatar(userMap, transaction.getLastModifiedByUserId()));
         resp.setClientOperationId(transaction.getClientOperationId());
         resp.setVersion(transaction.getVersion());
         resp.setHappenedAt(transaction.getHappenedAt());
@@ -400,6 +404,16 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
     private String userUuid(Map<Long, UserAccount> userMap, Long userId) {
         UserAccount user = userMap.get(userId);
         return user == null ? null : user.getUuid();
+    }
+
+    private String userNickname(Map<Long, UserAccount> userMap, Long userId) {
+        UserAccount user = userMap.get(userId);
+        return user == null ? null : user.getNickname();
+    }
+
+    private String userAvatar(Map<Long, UserAccount> userMap, Long userId) {
+        UserAccount user = userMap.get(userId);
+        return user == null ? null : user.getAvatar();
     }
 
     private Map<Long, String> payerPersonUuidMap(List<LedgerTransaction> transactions) {

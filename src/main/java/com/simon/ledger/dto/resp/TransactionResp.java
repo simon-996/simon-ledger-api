@@ -27,7 +27,15 @@ public class TransactionResp {
 
     private String createdByUserUuid;
 
+    private String createdByNickname;
+
+    private String createdByAvatar;
+
     private String lastModifiedByUserUuid;
+
+    private String lastModifiedByNickname;
+
+    private String lastModifiedByAvatar;
 
     private String clientOperationId;
 

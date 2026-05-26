@@ -8,11 +8,14 @@ import com.simon.ledger.common.LedgerRoles;
 import com.simon.ledger.common.exception.BusinessException;
 import com.simon.ledger.dto.req.LedgerCreateReq;
 import com.simon.ledger.dto.req.LedgerUpdateReq;
+import com.simon.ledger.dto.resp.LedgerMemberSummaryResp;
 import com.simon.ledger.dto.resp.LedgerResp;
 import com.simon.ledger.entity.Ledger;
 import com.simon.ledger.entity.LedgerMember;
+import com.simon.ledger.entity.UserAccount;
 import com.simon.ledger.mapper.LedgerMapper;
 import com.simon.ledger.mapper.LedgerMemberMapper;
+import com.simon.ledger.mapper.UserAccountMapper;
 import com.simon.ledger.service.ChangeLogService;
 import com.simon.ledger.service.LedgerService;
 import lombok.RequiredArgsConstructor;
@@ -33,6 +36,7 @@ public class LedgerServiceImpl extends ServiceImpl<LedgerMapper, Ledger> impleme
     private static final int MEMBER_STATUS_ACTIVE = 1;
 
     private final LedgerMemberMapper ledgerMemberMapper;
+    private final UserAccountMapper userAccountMapper;
     private final ChangeLogService changeLogService;
 
     @Override
@@ -47,13 +51,16 @@ public class LedgerServiceImpl extends ServiceImpl<LedgerMapper, Ledger> impleme
                 .collect(Collectors.toMap(LedgerMember::getLedgerId, Function.identity(), (a, b) -> a));
         List<Long> ledgerIds = members.stream().map(LedgerMember::getLedgerId).toList();
 
-        return lambdaQuery()
+        List<Ledger> ledgers = lambdaQuery()
                 .in(Ledger::getId, ledgerIds)
                 .isNull(Ledger::getDeletedAt)
                 .list()
                 .stream()
                 .sorted(Comparator.comparing(Ledger::getUpdatedAt, Comparator.nullsLast(Comparator.naturalOrder())).reversed())
-                .map(ledger -> toResp(ledger, memberMap.get(ledger.getId()).getRole()))
+                .toList();
+        Map<Long, List<LedgerMemberSummaryResp>> membersMap = membersMap(ledgerIds);
+        return ledgers.stream()
+                .map(ledger -> toResp(ledger, memberMap.get(ledger.getId()).getRole(), membersMap.getOrDefault(ledger.getId(), List.of())))
                 .toList();
     }
 
@@ -80,7 +87,7 @@ public class LedgerServiceImpl extends ServiceImpl<LedgerMapper, Ledger> impleme
         ledgerMemberMapper.insert(member);
         changeLogService.record(ledger.getId(), "ledger", ledger.getUuid(), "create", userId);
 
-        return toResp(ledger, LedgerRoles.OWNER);
+        return toResp(ledger, LedgerRoles.OWNER, List.of(toMemberSummary(member, userAccountMapper.selectById(userId))));
     }
 
     @Override
@@ -88,7 +95,7 @@ public class LedgerServiceImpl extends ServiceImpl<LedgerMapper, Ledger> impleme
         Long userId = StpUtil.getLoginIdAsLong();
         Ledger ledger = requireLedger(ledgerUuid);
         LedgerMember member = requireActiveMember(ledger.getId(), userId);
-        return toResp(ledger, member.getRole());
+        return toResp(ledger, member.getRole(), membersMap(List.of(ledger.getId())).getOrDefault(ledger.getId(), List.of()));
     }
 
     @Override
@@ -106,7 +113,7 @@ public class LedgerServiceImpl extends ServiceImpl<LedgerMapper, Ledger> impleme
         ledger.setExchangeRateToCny(req.getExchangeRateToCny());
         updateById(ledger);
         changeLogService.record(ledger.getId(), "ledger", ledger.getUuid(), "update", userId);
-        return toResp(ledger, member.getRole());
+        return toResp(ledger, member.getRole(), membersMap(List.of(ledger.getId())).getOrDefault(ledger.getId(), List.of()));
     }
 
     @Override
@@ -154,13 +161,55 @@ public class LedgerServiceImpl extends ServiceImpl<LedgerMapper, Ledger> impleme
         return member;
     }
 
-    private LedgerResp toResp(Ledger ledger, String role) {
+    private Map<Long, List<LedgerMemberSummaryResp>> membersMap(List<Long> ledgerIds) {
+        if (ledgerIds.isEmpty()) {
+            return Map.of();
+        }
+        List<LedgerMember> members = ledgerMemberMapper.selectList(com.baomidou.mybatisplus.core.toolkit.Wrappers.<LedgerMember>lambdaQuery()
+                .in(LedgerMember::getLedgerId, ledgerIds)
+                .eq(LedgerMember::getStatus, MEMBER_STATUS_ACTIVE)
+                .isNull(LedgerMember::getDeletedAt)
+                .orderByAsc(LedgerMember::getJoinedAt));
+        Map<Long, UserAccount> userMap = userMap(members);
+        return members.stream()
+                .collect(Collectors.groupingBy(
+                        LedgerMember::getLedgerId,
+                        Collectors.mapping(member -> toMemberSummary(member, userMap.get(member.getUserId())), Collectors.toList())
+                ));
+    }
+
+    private Map<Long, UserAccount> userMap(List<LedgerMember> members) {
+        List<Long> userIds = members.stream()
+                .map(LedgerMember::getUserId)
+                .distinct()
+                .toList();
+        if (userIds.isEmpty()) {
+            return Map.of();
+        }
+        return userAccountMapper.selectList(com.baomidou.mybatisplus.core.toolkit.Wrappers.<UserAccount>lambdaQuery().in(UserAccount::getId, userIds))
+                .stream()
+                .collect(Collectors.toMap(UserAccount::getId, Function.identity(), (a, b) -> a));
+    }
+
+    private LedgerMemberSummaryResp toMemberSummary(LedgerMember member, UserAccount user) {
+        LedgerMemberSummaryResp resp = new LedgerMemberSummaryResp();
+        resp.setUuid(member.getUuid());
+        resp.setUserUuid(user == null ? null : user.getUuid());
+        resp.setNickname(user == null ? null : user.getNickname());
+        resp.setAvatar(user == null ? null : user.getAvatar());
+        resp.setRole(member.getRole());
+        return resp;
+    }
+
+    private LedgerResp toResp(Ledger ledger, String role, List<LedgerMemberSummaryResp> members) {
         LedgerResp resp = new LedgerResp();
         resp.setUuid(ledger.getUuid());
         resp.setName(ledger.getName());
         resp.setBaseCurrencyCode(ledger.getBaseCurrencyCode());
         resp.setExchangeRateToCny(ledger.getExchangeRateToCny());
         resp.setRole(role);
+        resp.setMemberCount(members.size());
+        resp.setMembers(members);
         resp.setCreatedAt(ledger.getCreatedAt());
         resp.setUpdatedAt(ledger.getUpdatedAt());
         return resp;
