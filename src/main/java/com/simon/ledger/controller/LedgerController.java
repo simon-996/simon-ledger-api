@@ -2,7 +2,9 @@ package com.simon.ledger.controller;
 
 import com.simon.ledger.common.Result;
 import com.simon.ledger.dto.req.LedgerCreateReq;
+import com.simon.ledger.dto.req.LedgerCreateWithPeopleReq;
 import com.simon.ledger.dto.req.LedgerUpdateReq;
+import com.simon.ledger.dto.resp.LedgerCreateWithPeopleResp;
 import com.simon.ledger.dto.resp.LedgerResp;
 import com.simon.ledger.service.IdempotencyService;
 import com.simon.ledger.service.LedgerService;
@@ -49,6 +51,21 @@ public class LedgerController {
                 "/api/ledgers",
                 LedgerResp.class,
                 () -> ledgerService.create(req)
+        ));
+    }
+
+    @Operation(summary = "创建账本并初始化人员")
+    @PostMapping("/with-people")
+    public Result<LedgerCreateWithPeopleResp> createWithPeople(
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            @Valid @RequestBody LedgerCreateWithPeopleReq req
+    ) {
+        return Result.ok(idempotencyService.execute(
+                idempotencyKey,
+                "POST",
+                "/api/ledgers/with-people",
+                LedgerCreateWithPeopleResp.class,
+                () -> ledgerService.createWithPeople(req)
         ));
     }
 

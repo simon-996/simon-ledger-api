@@ -7,9 +7,13 @@ import com.simon.ledger.common.ErrorCode;
 import com.simon.ledger.common.LedgerRoles;
 import com.simon.ledger.common.exception.BusinessException;
 import com.simon.ledger.dto.req.LedgerCreateReq;
+import com.simon.ledger.dto.req.LedgerCreateWithPeopleReq;
 import com.simon.ledger.dto.req.LedgerUpdateReq;
+import com.simon.ledger.dto.req.PersonCreateReq;
 import com.simon.ledger.dto.resp.LedgerMemberSummaryResp;
+import com.simon.ledger.dto.resp.LedgerCreateWithPeopleResp;
 import com.simon.ledger.dto.resp.LedgerResp;
+import com.simon.ledger.dto.resp.PersonResp;
 import com.simon.ledger.entity.Ledger;
 import com.simon.ledger.entity.LedgerMember;
 import com.simon.ledger.entity.UserAccount;
@@ -18,6 +22,7 @@ import com.simon.ledger.mapper.LedgerMemberMapper;
 import com.simon.ledger.mapper.UserAccountMapper;
 import com.simon.ledger.service.ChangeLogService;
 import com.simon.ledger.service.LedgerService;
+import com.simon.ledger.service.PersonService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -38,6 +43,7 @@ public class LedgerServiceImpl extends ServiceImpl<LedgerMapper, Ledger> impleme
     private final LedgerMemberMapper ledgerMemberMapper;
     private final UserAccountMapper userAccountMapper;
     private final ChangeLogService changeLogService;
+    private final PersonService personService;
 
     @Override
     public List<LedgerResp> listMine() {
@@ -88,6 +94,26 @@ public class LedgerServiceImpl extends ServiceImpl<LedgerMapper, Ledger> impleme
         changeLogService.record(ledger.getId(), "ledger", ledger.getUuid(), "create", userId);
 
         return toResp(ledger, LedgerRoles.OWNER, List.of(toMemberSummary(member, userAccountMapper.selectById(userId))));
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public LedgerCreateWithPeopleResp createWithPeople(LedgerCreateWithPeopleReq req) {
+        LedgerCreateReq ledgerReq = new LedgerCreateReq();
+        ledgerReq.setName(req.getName());
+        ledgerReq.setBaseCurrencyCode(req.getBaseCurrencyCode());
+        ledgerReq.setExchangeRateToCny(req.getExchangeRateToCny());
+
+        LedgerResp ledger = create(ledgerReq);
+        List<PersonResp> people = (req.getPeople() == null ? List.<PersonCreateReq>of() : req.getPeople())
+                .stream()
+                .map(personReq -> personService.create(ledger.getUuid(), personReq))
+                .toList();
+
+        LedgerCreateWithPeopleResp resp = new LedgerCreateWithPeopleResp();
+        resp.setLedger(ledger);
+        resp.setPeople(people);
+        return resp;
     }
 
     @Override
