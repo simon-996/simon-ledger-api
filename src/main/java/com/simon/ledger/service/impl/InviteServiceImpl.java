@@ -10,13 +10,16 @@ import com.simon.ledger.common.ErrorCode;
 import com.simon.ledger.common.LedgerRoles;
 import com.simon.ledger.common.exception.BusinessException;
 import com.simon.ledger.dto.req.InviteCreateReq;
+import com.simon.ledger.dto.resp.InviteMemberSummaryResp;
 import com.simon.ledger.dto.resp.InviteResp;
 import com.simon.ledger.entity.Ledger;
 import com.simon.ledger.entity.LedgerInvite;
 import com.simon.ledger.entity.LedgerMember;
+import com.simon.ledger.entity.UserAccount;
 import com.simon.ledger.mapper.LedgerInviteMapper;
 import com.simon.ledger.mapper.LedgerMapper;
 import com.simon.ledger.mapper.LedgerMemberMapper;
+import com.simon.ledger.mapper.UserAccountMapper;
 import com.simon.ledger.service.ChangeLogService;
 import com.simon.ledger.service.InviteService;
 import lombok.RequiredArgsConstructor;
@@ -24,6 +27,10 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.List;
+import java.util.Map;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
@@ -33,6 +40,7 @@ public class InviteServiceImpl extends ServiceImpl<LedgerInviteMapper, LedgerInv
 
     private final LedgerMapper ledgerMapper;
     private final LedgerMemberMapper ledgerMemberMapper;
+    private final UserAccountMapper userAccountMapper;
     private final ChangeLogService changeLogService;
 
     @Override
@@ -171,11 +179,23 @@ public class InviteServiceImpl extends ServiceImpl<LedgerInviteMapper, LedgerInv
     }
 
     private InviteResp toResp(LedgerInvite invite, Ledger ledger) {
+        List<LedgerMember> members = ledgerMemberMapper.selectList(Wrappers.<LedgerMember>lambdaQuery()
+                .eq(LedgerMember::getLedgerId, ledger.getId())
+                .eq(LedgerMember::getStatus, MEMBER_STATUS_ACTIVE)
+                .isNull(LedgerMember::getDeletedAt)
+                .orderByAsc(LedgerMember::getJoinedAt));
+        Map<Long, UserAccount> userMap = userMap(members);
+
         InviteResp resp = new InviteResp();
         resp.setUuid(invite.getUuid());
         resp.setCode(invite.getCode());
         resp.setLedgerUuid(ledger.getUuid());
         resp.setLedgerName(ledger.getName());
+        resp.setLedgerBaseCurrencyCode(ledger.getBaseCurrencyCode());
+        resp.setLedgerMemberCount(members.size());
+        resp.setLedgerMembers(members.stream()
+                .map(member -> toMemberSummary(member, userMap.get(member.getUserId())))
+                .toList());
         resp.setRole(invite.getRole());
         resp.setMaxUses(invite.getMaxUses());
         resp.setUsedCount(invite.getUsedCount());
@@ -183,6 +203,27 @@ public class InviteServiceImpl extends ServiceImpl<LedgerInviteMapper, LedgerInv
         resp.setCreatedAt(invite.getCreatedAt());
         resp.setExpired(!invite.getExpiresAt().isAfter(LocalDateTime.now()));
         resp.setDisabled(invite.getDisabledAt() != null);
+        return resp;
+    }
+
+    private Map<Long, UserAccount> userMap(List<LedgerMember> members) {
+        List<Long> userIds = members.stream()
+                .map(LedgerMember::getUserId)
+                .distinct()
+                .toList();
+        if (userIds.isEmpty()) {
+            return Map.of();
+        }
+        return userAccountMapper.selectList(Wrappers.<UserAccount>lambdaQuery().in(UserAccount::getId, userIds))
+                .stream()
+                .collect(Collectors.toMap(UserAccount::getId, Function.identity(), (a, b) -> a));
+    }
+
+    private InviteMemberSummaryResp toMemberSummary(LedgerMember member, UserAccount user) {
+        InviteMemberSummaryResp resp = new InviteMemberSummaryResp();
+        resp.setNickname(user == null ? null : user.getNickname());
+        resp.setAvatar(user == null ? null : user.getAvatar());
+        resp.setRole(member.getRole());
         return resp;
     }
 

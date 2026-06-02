@@ -3,6 +3,7 @@ package com.simon.ledger.dto.resp;
 import lombok.Data;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 @Data
 public class InviteResp {
@@ -14,6 +15,12 @@ public class InviteResp {
     private String ledgerUuid;
 
     private String ledgerName;
+
+    private String ledgerBaseCurrencyCode;
+
+    private Integer ledgerMemberCount;
+
+    private List<InviteMemberSummaryResp> ledgerMembers;
 
     private String role;
 
