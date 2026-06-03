@@ -105,4 +105,19 @@ public class LedgerController {
         );
         return Result.ok();
     }
+
+    @Operation(summary = "退出共享账本")
+    @PostMapping("/{ledgerUuid}/leave")
+    public Result<Void> leave(
+            @PathVariable String ledgerUuid,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey
+    ) {
+        idempotencyService.executeVoid(
+                idempotencyKey,
+                "POST",
+                "/api/ledgers/" + ledgerUuid + "/leave",
+                () -> ledgerService.leave(ledgerUuid)
+        );
+        return Result.ok();
+    }
 }

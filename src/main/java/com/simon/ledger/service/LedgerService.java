@@ -21,4 +21,6 @@ public interface LedgerService {
     LedgerResp update(String ledgerUuid, LedgerUpdateReq req);
 
     void delete(String ledgerUuid);
+
+    void leave(String ledgerUuid);
 }

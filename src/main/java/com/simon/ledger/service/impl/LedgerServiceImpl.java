@@ -157,6 +157,30 @@ public class LedgerServiceImpl extends ServiceImpl<LedgerMapper, Ledger> impleme
         changeLogService.record(ledger.getId(), "ledger", ledger.getUuid(), "delete", userId);
     }
 
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void leave(String ledgerUuid) {
+        Long userId = StpUtil.getLoginIdAsLong();
+        Ledger ledger = requireLedger(ledgerUuid);
+        LedgerMember member = ledgerMemberMapper.selectOne(com.baomidou.mybatisplus.core.toolkit.Wrappers.<LedgerMember>lambdaQuery()
+                .eq(LedgerMember::getLedgerId, ledger.getId())
+                .eq(LedgerMember::getUserId, userId)
+                .eq(LedgerMember::getStatus, MEMBER_STATUS_ACTIVE));
+        if (member == null) {
+            throw new BusinessException(ErrorCode.FORBIDDEN);
+        }
+        if (member.getDeletedAt() != null) {
+            return;
+        }
+        if (LedgerRoles.isOwner(member.getRole())) {
+            throw new BusinessException(ErrorCode.FORBIDDEN, "owner 不能退出账本");
+        }
+
+        member.setDeletedAt(LocalDateTime.now());
+        ledgerMemberMapper.updateById(member);
+        changeLogService.record(ledger.getId(), "member", member.getUuid(), "delete", userId);
+    }
+
     private List<LedgerMember> activeMembersByUserId(Long userId) {
         return ledgerMemberMapper.selectList(com.baomidou.mybatisplus.core.toolkit.Wrappers.<LedgerMember>lambdaQuery()
                 .eq(LedgerMember::getUserId, userId)
