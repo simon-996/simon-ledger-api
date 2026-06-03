@@ -2,6 +2,7 @@ package com.simon.ledger.controller;
 
 import com.simon.ledger.common.Result;
 import com.simon.ledger.dto.req.InviteCreateReq;
+import com.simon.ledger.dto.req.InviteRegenerateReq;
 import com.simon.ledger.dto.resp.InviteResp;
 import com.simon.ledger.service.IdempotencyService;
 import com.simon.ledger.service.InviteService;
@@ -38,6 +39,28 @@ public class InviteController {
                 "/api/ledgers/" + ledgerUuid + "/invites",
                 InviteResp.class,
                 () -> inviteService.create(ledgerUuid, req)
+        ));
+    }
+
+    @Operation(summary = "查询当前可用邀请")
+    @GetMapping("/api/ledgers/{ledgerUuid}/invites/current")
+    public Result<InviteResp> current(@PathVariable String ledgerUuid) {
+        return Result.ok(inviteService.current(ledgerUuid));
+    }
+
+    @Operation(summary = "重新生成邀请")
+    @PostMapping("/api/ledgers/{ledgerUuid}/invites/regenerate")
+    public Result<InviteResp> regenerate(
+            @PathVariable String ledgerUuid,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            @Valid @RequestBody InviteRegenerateReq req
+    ) {
+        return Result.ok(idempotencyService.execute(
+                idempotencyKey,
+                "POST",
+                "/api/ledgers/" + ledgerUuid + "/invites/regenerate",
+                InviteResp.class,
+                () -> inviteService.regenerate(ledgerUuid, req)
         ));
     }
 

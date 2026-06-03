@@ -10,6 +10,7 @@ import com.simon.ledger.common.ErrorCode;
 import com.simon.ledger.common.LedgerRoles;
 import com.simon.ledger.common.exception.BusinessException;
 import com.simon.ledger.dto.req.InviteCreateReq;
+import com.simon.ledger.dto.req.InviteRegenerateReq;
 import com.simon.ledger.dto.resp.InviteMemberSummaryResp;
 import com.simon.ledger.dto.resp.InviteResp;
 import com.simon.ledger.entity.Ledger;
@@ -37,6 +38,7 @@ import java.util.stream.Collectors;
 public class InviteServiceImpl extends ServiceImpl<LedgerInviteMapper, LedgerInvite> implements InviteService {
 
     private static final int MEMBER_STATUS_ACTIVE = 1;
+    private static final List<Integer> ALLOWED_REGENERATE_DAYS = List.of(1, 3, 5, 7);
 
     private final LedgerMapper ledgerMapper;
     private final LedgerMemberMapper ledgerMemberMapper;
@@ -48,27 +50,63 @@ public class InviteServiceImpl extends ServiceImpl<LedgerInviteMapper, LedgerInv
     public InviteResp create(String ledgerUuid, InviteCreateReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
         Ledger ledger = requireLedger(ledgerUuid);
-        LedgerMember member = requireActiveMember(ledger.getId(), userId);
-        if (!LedgerRoles.canManageLedger(member.getRole())) {
-            throw new BusinessException(ErrorCode.FORBIDDEN);
-        }
+        requireLedgerManager(ledger.getId(), userId);
         String role = normalizeRole(req.getRole());
         if (!LedgerRoles.isValidJoinableRole(role)) {
             throw new BusinessException(ErrorCode.BAD_REQUEST, "邀请角色不正确");
         }
+        LocalDateTime now = LocalDateTime.now();
+        disableUsableInvites(ledger.getId(), now);
+        LedgerInvite invite = createInvite(ledger, userId, role, req.getMaxUses(), req.getExpiresAt(), now);
+        return toResp(invite, ledger);
+    }
 
+    @Override
+    public InviteResp current(String ledgerUuid) {
+        Long userId = StpUtil.getLoginIdAsLong();
+        Ledger ledger = requireLedger(ledgerUuid);
+        requireLedgerManager(ledger.getId(), userId);
+        LedgerInvite invite = currentUsableInvite(ledger.getId(), LocalDateTime.now());
+        return invite == null ? null : toResp(invite, ledger);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public InviteResp regenerate(String ledgerUuid, InviteRegenerateReq req) {
+        Long userId = StpUtil.getLoginIdAsLong();
+        Ledger ledger = requireLedger(ledgerUuid);
+        requireLedgerManager(ledger.getId(), userId);
+        int days = requireAllowedDays(req.getDays());
+        String role = normalizeRole(req.getRole());
+        if (!LedgerRoles.isValidJoinableRole(role)) {
+            throw new BusinessException(ErrorCode.BAD_REQUEST, "邀请角色不正确");
+        }
+        LocalDateTime now = LocalDateTime.now();
+        disableUsableInvites(ledger.getId(), now);
+        LedgerInvite invite = createInvite(ledger, userId, role, req.getMaxUses(), now.plusDays(days), now);
+        return toResp(invite, ledger);
+    }
+
+    private LedgerInvite createInvite(
+            Ledger ledger,
+            Long userId,
+            String role,
+            Integer maxUses,
+            LocalDateTime expiresAt,
+            LocalDateTime now
+    ) {
         LedgerInvite invite = new LedgerInvite();
         invite.setUuid(IdUtil.fastSimpleUUID());
         invite.setLedgerId(ledger.getId());
         invite.setCode(generateCode());
         invite.setRole(role);
         invite.setCreatedByUserId(userId);
-        invite.setMaxUses(req.getMaxUses());
+        invite.setMaxUses(maxUses);
         invite.setUsedCount(0);
-        invite.setExpiresAt(req.getExpiresAt());
-        invite.setCreatedAt(LocalDateTime.now());
+        invite.setExpiresAt(expiresAt);
+        invite.setCreatedAt(now);
         save(invite);
-        return toResp(invite, ledger);
+        return invite;
     }
 
     @Override
@@ -134,6 +172,27 @@ public class InviteServiceImpl extends ServiceImpl<LedgerInviteMapper, LedgerInv
         invite.setUsedCount(oldUsedCount + 1);
     }
 
+    private LedgerInvite currentUsableInvite(Long ledgerId, LocalDateTime now) {
+        return getOne(Wrappers.<LedgerInvite>lambdaQuery()
+                .eq(LedgerInvite::getLedgerId, ledgerId)
+                .isNull(LedgerInvite::getDisabledAt)
+                .gt(LedgerInvite::getExpiresAt, now)
+                .apply("(max_uses IS NULL OR used_count < max_uses)")
+                .orderByDesc(LedgerInvite::getCreatedAt)
+                .orderByDesc(LedgerInvite::getId)
+                .last("limit 1"));
+    }
+
+    private void disableUsableInvites(Long ledgerId, LocalDateTime now) {
+        LambdaUpdateWrapper<LedgerInvite> wrapper = Wrappers.<LedgerInvite>lambdaUpdate()
+                .eq(LedgerInvite::getLedgerId, ledgerId)
+                .isNull(LedgerInvite::getDisabledAt)
+                .gt(LedgerInvite::getExpiresAt, now)
+                .apply("(max_uses IS NULL OR used_count < max_uses)")
+                .set(LedgerInvite::getDisabledAt, now);
+        baseMapper.update(null, wrapper);
+    }
+
     private Ledger requireLedger(String ledgerUuid) {
         Ledger ledger = ledgerMapper.selectOne(Wrappers.<Ledger>lambdaQuery()
                 .eq(Ledger::getUuid, ledgerUuid)
@@ -154,6 +213,13 @@ public class InviteServiceImpl extends ServiceImpl<LedgerInviteMapper, LedgerInv
             throw new BusinessException(ErrorCode.FORBIDDEN);
         }
         return member;
+    }
+
+    private void requireLedgerManager(Long ledgerId, Long userId) {
+        LedgerMember member = requireActiveMember(ledgerId, userId);
+        if (!LedgerRoles.canManageLedger(member.getRole())) {
+            throw new BusinessException(ErrorCode.FORBIDDEN);
+        }
     }
 
     private LedgerInvite requireInvite(String code) {
@@ -237,5 +303,12 @@ public class InviteServiceImpl extends ServiceImpl<LedgerInviteMapper, LedgerInv
 
     private String normalizeRole(String role) {
         return role == null ? "" : role.trim().toLowerCase();
+    }
+
+    private int requireAllowedDays(Integer days) {
+        if (days == null || !ALLOWED_REGENERATE_DAYS.contains(days)) {
+            throw new BusinessException(ErrorCode.BAD_REQUEST, "邀请有效期不正确");
+        }
+        return days;
     }
 }
