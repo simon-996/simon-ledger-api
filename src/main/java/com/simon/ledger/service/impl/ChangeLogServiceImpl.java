@@ -20,7 +20,6 @@ import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
@@ -53,12 +52,7 @@ public class ChangeLogServiceImpl implements ChangeLogService {
     }
 
     private void doRecord(Long ledgerId, String entityType, String entityUuid, String operation, Long operatorUserId) {
-        Integer maxVersion = ledgerChangeLogMapper.selectList(Wrappers.<LedgerChangeLog>lambdaQuery()
-                        .eq(LedgerChangeLog::getLedgerId, ledgerId))
-                .stream()
-                .map(LedgerChangeLog::getVersion)
-                .max(Comparator.naturalOrder())
-                .orElse(0);
+        Integer maxVersion = maxVersion(ledgerId);
 
         LedgerChangeLog log = new LedgerChangeLog();
         log.setUuid(IdUtil.fastSimpleUUID());
@@ -70,6 +64,19 @@ public class ChangeLogServiceImpl implements ChangeLogService {
         log.setVersion(maxVersion + 1);
         log.setCreatedAt(LocalDateTime.now());
         ledgerChangeLogMapper.insert(log);
+    }
+
+    private Integer maxVersion(Long ledgerId) {
+        Object value = ledgerChangeLogMapper.selectObjs(Wrappers.<LedgerChangeLog>query()
+                        .select("COALESCE(MAX(version), 0)")
+                        .eq("ledger_id", ledgerId))
+                .stream()
+                .findFirst()
+                .orElse(0);
+        if (value instanceof Number number) {
+            return number.intValue();
+        }
+        return Integer.parseInt(value.toString());
     }
 
     @Override

@@ -21,3 +21,16 @@ mybatis-plus:
 
 sa-token:
   is-log: false
+  timeout: 604800
+  active-timeout: 86400
+  is-share: false
+
+springdoc:
+  api-docs:
+    enabled: false
+  swagger-ui:
+    enabled: false
+
+ledger:
+  web:
+    allowed-origin-patterns: https://ledger.simon996.com,https://admin-ledger.simon996.com

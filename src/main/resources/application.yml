@@ -27,3 +27,7 @@ springdoc:
     path: /v3/api-docs
   swagger-ui:
     path: /swagger-ui.html
+
+ledger:
+  web:
+    allowed-origin-patterns: http://localhost:*,http://127.0.0.1:*
