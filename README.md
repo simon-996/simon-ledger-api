@@ -24,6 +24,7 @@ Simon Ledger 的后端 API，负责用户登录、云端账本、成员权限、
 - 邀请：查询当前邀请码、重新生成邀请码、预览邀请、加入账本。
 - 统计：汇总、分类统计、人员结余和代付结算。
 - 同步：写接口支持幂等 key，变更写入 `ledger_change_log` 并提供增量查询。
+- 后台：提供独立 `/api/admin/*` 管理接口，用于运营总览、用户/账本查询、审计日志和系统健康检查。
 
 ## 目录结构
 
@@ -43,6 +44,7 @@ src/main/resources/
 sql/
   001_init_schema.sql
   002_add_transaction_payer.sql
+  003_add_admin_console.sql
 ```
 
 ## 主要接口
@@ -100,6 +102,22 @@ GET    /api/ledgers/{ledgerUuid}/stats/people-balances
 GET    /api/ledgers/{ledgerUuid}/changes
 ```
 
+后台管理接口：
+
+```text
+POST /api/admin/auth/login
+POST /api/admin/auth/logout
+GET  /api/admin/auth/me
+
+GET  /api/admin/dashboard
+GET  /api/admin/users?keyword=&page=&pageSize=
+GET  /api/admin/ledgers?keyword=&page=&pageSize=
+GET  /api/admin/audit-logs?page=&pageSize=
+GET  /api/admin/system/health
+```
+
+后台登录使用独立 `admin_user` 表，登录 ID 使用 `admin:` 前缀与普通 App 用户隔离。除 `POST /api/admin/auth/login` 外，后台接口都需要有效后台登录态。
+
 Swagger:
 
 ```text
@@ -139,7 +157,10 @@ src/main/resources/application-prod.yml.example
 ```text
 sql/001_init_schema.sql
 sql/002_add_transaction_payer.sql
+sql/003_add_admin_console.sql
 ```
+
+`003_add_admin_console.sql` 会创建 `admin_user` 和 `admin_operation_log`。首个后台管理员不会自动创建，需要先生成 BCrypt 密码 hash，再手动插入 `admin_user`。
 
 ## 本地开发
 
