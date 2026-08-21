@@ -7,11 +7,14 @@ import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.simon.ledger.common.ErrorCode;
 import com.simon.ledger.common.exception.BusinessException;
+import com.simon.ledger.common.exception.VersionConflictException;
 import com.simon.ledger.dto.req.AuthLoginReq;
 import com.simon.ledger.dto.req.AuthProfileUpdateReq;
 import com.simon.ledger.dto.req.AuthRegisterReq;
 import com.simon.ledger.dto.resp.AuthLoginResp;
 import com.simon.ledger.dto.resp.AuthUserResp;
+import com.simon.ledger.dto.resp.ConflictResp;
+import com.simon.ledger.dto.resp.ProfileConflictSnapshotResp;
 import com.simon.ledger.entity.LedgerPerson;
 import com.simon.ledger.entity.UserAccount;
 import com.simon.ledger.mapper.LedgerPersonMapper;
@@ -24,6 +27,8 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 import java.util.List;
+import java.time.LocalDateTime;
+import java.util.Objects;
 
 @Service
 @RequiredArgsConstructor
@@ -114,9 +119,37 @@ public class AuthServiceImpl extends ServiceImpl<UserAccountMapper, UserAccount>
             throw new BusinessException(ErrorCode.FORBIDDEN, "账号已禁用");
         }
 
-        user.setNickname(req.getNickname().trim());
-        user.setAvatar(normalize(req.getAvatar()));
-        updateById(user);
+        if (!Objects.equals(req.getVersion(), user.getVersion())) {
+            throw profileConflict(req.getVersion(), user);
+        }
+
+        String nickname = req.getNickname().trim();
+        String avatar = normalize(req.getAvatar());
+        int nextVersion = req.getVersion() + 1;
+        LocalDateTime updatedAt = LocalDateTime.now();
+        int affected = baseMapper.update(null, Wrappers.<UserAccount>lambdaUpdate()
+                .eq(UserAccount::getId, userId)
+                .eq(UserAccount::getVersion, req.getVersion())
+                .isNull(UserAccount::getDeletedAt)
+                .set(UserAccount::getNickname, nickname)
+                .set(UserAccount::getAvatar, avatar)
+                .set(UserAccount::getVersion, nextVersion)
+                .set(UserAccount::getUpdatedAt, updatedAt));
+        if (affected == 0) {
+            UserAccount current = baseMapper.selectOne(Wrappers.<UserAccount>lambdaQuery()
+                    .eq(UserAccount::getId, userId)
+                    .isNull(UserAccount::getDeletedAt)
+                    .last("FOR UPDATE"));
+            if (current == null) {
+                throw new BusinessException(ErrorCode.UNAUTHORIZED);
+            }
+            throw profileConflict(req.getVersion(), current);
+        }
+
+        user.setNickname(nickname);
+        user.setAvatar(avatar);
+        user.setVersion(nextVersion);
+        user.setUpdatedAt(updatedAt);
         syncLinkedPeople(userId, user);
         return toUserResp(user);
     }
@@ -126,11 +159,24 @@ public class AuthServiceImpl extends ServiceImpl<UserAccountMapper, UserAccount>
                 .eq(LedgerPerson::getLinkedUserId, userId)
                 .isNull(LedgerPerson::getDeletedAt));
         for (LedgerPerson person : people) {
-            person.setName(user.getNickname());
-            person.setAvatar(user.getAvatar() == null ? "" : user.getAvatar());
-            ledgerPersonMapper.updateById(person);
-            changeLogService.record(person.getLedgerId(), "person", person.getUuid(), "update", userId);
+            int affected = ledgerPersonMapper.update(null, Wrappers.<LedgerPerson>lambdaUpdate()
+                    .eq(LedgerPerson::getId, person.getId())
+                    .isNull(LedgerPerson::getDeletedAt)
+                    .set(LedgerPerson::getName, user.getNickname())
+                    .set(LedgerPerson::getAvatar, user.getAvatar() == null ? "" : user.getAvatar())
+                    .set(LedgerPerson::getUpdatedAt, LocalDateTime.now())
+                    .setSql("version = version + 1"));
+            if (affected == 1) {
+                changeLogService.record(person.getLedgerId(), "person", person.getUuid(), "update", userId);
+            }
         }
+    }
+
+    private VersionConflictException profileConflict(Integer submittedVersion, UserAccount remote) {
+        ProfileConflictSnapshotResp snapshot = new ProfileConflictSnapshotResp(
+                remote.getUuid(), remote.getNickname(), remote.getAvatar(), remote.getVersion());
+        return new VersionConflictException(new ConflictResp(
+                "profile", remote.getUuid(), submittedVersion, remote.getVersion(), false, snapshot));
     }
 
     private boolean existsByEmail(String email) {
