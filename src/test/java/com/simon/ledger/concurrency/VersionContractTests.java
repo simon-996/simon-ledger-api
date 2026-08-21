@@ -107,6 +107,8 @@ class VersionContractTests {
         assertEquals(9, ConcurrencyFixtures.profileReq("n", 9).getVersion());
         assertEquals("", ConcurrencyFixtures.profileReq("n", 9).getAvatar());
         assertEquals(8L, ConcurrencyFixtures.ledger(8, "l").getId());
+        assertEquals("测试账本", ConcurrencyFixtures.ledger(8, "l").getName());
+        assertEquals(7L, ConcurrencyFixtures.ledger(8, "l").getOwnerUserId());
         assertEquals(4, ConcurrencyFixtures.ledger(8, "l", 4, null).getVersion());
         var member = ConcurrencyFixtures.ownerMember(1, 2);
         assertEquals(43L, member.getId());

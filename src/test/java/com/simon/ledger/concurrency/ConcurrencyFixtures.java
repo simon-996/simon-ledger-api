@@ -49,8 +49,8 @@ public final class ConcurrencyFixtures {
 
     public static Ledger ledger() {
         Ledger ledger = new Ledger();
-        ledger.setUuid("ledger-uuid"); ledger.setName("Test Ledger"); ledger.setBaseCurrencyCode("CNY");
-        ledger.setExchangeRateToCny(BigDecimal.ONE); ledger.setOwnerUserId(1L);
+        ledger.setUuid("ledger-uuid"); ledger.setName("测试账本"); ledger.setBaseCurrencyCode("CNY");
+        ledger.setExchangeRateToCny(BigDecimal.ONE); ledger.setOwnerUserId(7L);
         return ledger;
     }
 
