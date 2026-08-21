@@ -37,15 +37,19 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RestExceptionMvcBoundaryTests {
     private final Logger logger = (Logger) LogManager.getLogger(RestExceptionHandler.class);
     private final CapturingAppender appender = new CapturingAppender();
+    private Level originalLevel;
     private MockMvc mvc;
 
     @BeforeEach
     void setUp() {
+        originalLevel = logger.getLevel();
         logger.addAppender(appender);
         logger.setLevel(Level.ALL);
         mvc = MockMvcBuilders.standaloneSetup(new ThrowingController())
@@ -56,6 +60,7 @@ class RestExceptionMvcBoundaryTests {
     @AfterEach
     void tearDown() {
         logger.removeAppender(appender);
+        logger.setLevel(originalLevel);
     }
 
     @Test
@@ -74,12 +79,24 @@ class RestExceptionMvcBoundaryTests {
 
     @Test
     void unknownExceptionDoesNotLeakMessageIntoLogsOrJson() throws Exception {
-        mvc.perform(get("/throw-unknown"))
+        var result = mvc.perform(get("/throw-unknown"))
                 .andExpect(status().isInternalServerError())
                 .andExpect(jsonPath("$.code").value(500001))
-                .andExpect(jsonPath("$.message").value("系统错误"));
-        String logs = String.join("\n", appender.messages);
-        org.junit.jupiter.api.Assertions.assertFalse(logs.contains("secret should not leak"));
+                .andExpect(jsonPath("$.message").value("系统错误"))
+                .andReturn();
+        String responseBody = result.getResponse().getContentAsString();
+        assertFalse(responseBody.contains("secret should not leak"));
+        String correlationId = result.getResponse().getHeader("X-Correlation-Id");
+        assertNotNull(correlationId);
+        assertFalse(correlationId.isBlank());
+        assertFalse(appender.events.isEmpty());
+        assertTrue(appender.events.stream().allMatch(event -> event.getThrown() == null));
+        String rendered = appender.events.stream()
+                .map(event -> PatternLayout.createDefaultLayout().toSerializable(event))
+                .reduce("", (all, next) -> all + next);
+        assertFalse(rendered.contains("secret should not leak"));
+        assertTrue(appender.events.stream().anyMatch(event ->
+                event.getMessage().getFormattedMessage().contains(correlationId)));
     }
 
     @Test
@@ -150,11 +167,6 @@ class RestExceptionMvcBoundaryTests {
         @GetMapping("/constraint-violation")
         void constraintViolation() { throw new ConstraintViolationException("invalid", Collections.emptySet()); }
 
-        @GetMapping("/throw-access")
-        void access() {
-            throw new BusinessException(ErrorCode.BAD_REQUEST);
-        }
-
         @PostMapping("/validate")
         void validate(@Valid @RequestBody Payload payload) {
         }
@@ -174,7 +186,7 @@ class RestExceptionMvcBoundaryTests {
     }
 
     static class CapturingAppender extends AbstractAppender {
-        private final List<String> messages = new CopyOnWriteArrayList<>();
+        private final List<LogEvent> events = new CopyOnWriteArrayList<>();
 
         CapturingAppender() {
             super("test-capture", null, PatternLayout.createDefaultLayout(), false, Property.EMPTY_ARRAY);
@@ -183,7 +195,7 @@ class RestExceptionMvcBoundaryTests {
 
         @Override
         public void append(LogEvent event) {
-            messages.add(event.getMessage().getFormattedMessage());
+            events.add(event.toImmutable());
         }
     }
 }

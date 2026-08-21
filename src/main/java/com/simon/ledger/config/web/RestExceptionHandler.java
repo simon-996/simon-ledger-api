@@ -57,8 +57,12 @@ public class RestExceptionHandler {
 
     @ExceptionHandler(Exception.class)
     public ResponseEntity<Result<?>> exceptionHandler(Exception e) {
-        log.error("system exception correlationId={}", UUID.randomUUID());
-        return response(ErrorCode.SYSTEM_ERROR, ErrorCode.SYSTEM_ERROR.getMessage(), null);
+        String correlationId = UUID.randomUUID().toString();
+        log.error("system exception correlationId={}", correlationId);
+        Result<?> result = Result.fail(ErrorCode.SYSTEM_ERROR, ErrorCode.SYSTEM_ERROR.getMessage(), null);
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                .header("X-Correlation-Id", correlationId)
+                .body(result);
     }
 
     private ResponseEntity<Result<?>> response(ErrorCode errorCode, String message, Object data) {
