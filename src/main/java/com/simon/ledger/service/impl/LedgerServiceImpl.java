@@ -266,6 +266,7 @@ public class LedgerServiceImpl extends ServiceImpl<LedgerMapper, Ledger> impleme
         int affected = ledgerMemberMapper.update(null, Wrappers.<LedgerMember>lambdaUpdate()
                 .eq(LedgerMember::getId, member.getId())
                 .eq(LedgerMember::getVersion, req.getVersion())
+                .eq(LedgerMember::getStatus, MEMBER_STATUS_ACTIVE)
                 .isNull(LedgerMember::getDeletedAt)
                 .set(LedgerMember::getDeletedAt, updatedAt)
                 .set(LedgerMember::getUpdatedAt, updatedAt)

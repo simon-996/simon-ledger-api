@@ -211,6 +211,8 @@ class LedgerServiceConcurrencyTests {
         ArgumentCaptor<LambdaUpdateWrapper<LedgerMember>> captor = memberUpdateCaptor();
         verify(memberMapper).update(isNull(), captor.capture());
         assertAtomicWrapper(captor.getValue(), "deleted_at IS NULL", 4, 5);
+        assertTrue(captor.getValue().getSqlSegment().contains("status"));
+        assertTrue(captor.getValue().getParamNameValuePairs().containsValue(1));
         verify(memberMapper, never()).updateById(any(LedgerMember.class));
         verify(changeLogService).record(11L, "member", "member-uuid", "delete", 7L);
     }
