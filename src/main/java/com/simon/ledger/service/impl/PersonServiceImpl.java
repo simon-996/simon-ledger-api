@@ -298,6 +298,7 @@ public class PersonServiceImpl extends ServiceImpl<LedgerPersonMapper, LedgerPer
         resp.setLinkedUserUuid(linkedUser == null ? null : linkedUser.getUuid());
         resp.setName(person.getName());
         resp.setAvatar(person.getAvatar());
+        resp.setVersion(person.getVersion());
         resp.setCreatedAt(person.getCreatedAt());
         resp.setUpdatedAt(person.getUpdatedAt());
         return resp;

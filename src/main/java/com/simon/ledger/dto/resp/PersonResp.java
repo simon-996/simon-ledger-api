@@ -17,6 +17,8 @@ public class PersonResp {
 
     private String avatar;
 
+    private Integer version;
+
     private LocalDateTime createdAt;
 
     private LocalDateTime updatedAt;

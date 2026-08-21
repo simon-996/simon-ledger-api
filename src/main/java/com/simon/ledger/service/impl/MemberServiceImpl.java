@@ -152,6 +152,7 @@ public class MemberServiceImpl extends ServiceImpl<LedgerMemberMapper, LedgerMem
         resp.setAvatar(user == null ? null : user.getAvatar());
         resp.setRole(member.getRole());
         resp.setStatus(member.getStatus());
+        resp.setVersion(member.getVersion());
         resp.setJoinedAt(member.getJoinedAt());
         return resp;
     }

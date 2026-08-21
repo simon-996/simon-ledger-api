@@ -14,4 +14,6 @@ public class LedgerMemberSummaryResp {
     private String avatar;
 
     private String role;
+
+    private Integer version;
 }

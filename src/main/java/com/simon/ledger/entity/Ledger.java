@@ -27,6 +27,8 @@ public class Ledger {
 
     private Long ownerUserId;
 
+    private Integer version = 1;
+
     @TableField(fill = FieldFill.INSERT)
     private LocalDateTime createdAt;
 

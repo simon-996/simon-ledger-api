@@ -39,7 +39,7 @@ public class LedgerTransaction {
 
     private String clientOperationId;
 
-    private Integer version;
+    private Integer version = 1;
 
     private LocalDateTime happenedAt;
 

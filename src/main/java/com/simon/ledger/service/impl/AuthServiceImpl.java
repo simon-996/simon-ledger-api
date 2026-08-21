@@ -168,6 +168,7 @@ public class AuthServiceImpl extends ServiceImpl<UserAccountMapper, UserAccount>
         resp.setNickname(user.getNickname());
         resp.setAvatar(user.getAvatar());
         resp.setStatus(user.getStatus());
+        resp.setVersion(user.getVersion());
         return resp;
     }
 

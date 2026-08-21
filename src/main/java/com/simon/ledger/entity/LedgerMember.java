@@ -26,6 +26,8 @@ public class LedgerMember {
 
     private Integer status;
 
+    private Integer version = 1;
+
     private LocalDateTime joinedAt;
 
     @TableField(fill = FieldFill.INSERT)

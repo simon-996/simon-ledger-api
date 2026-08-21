@@ -17,6 +17,8 @@ public class LedgerResp {
 
     private BigDecimal exchangeRateToCny;
 
+    private Integer version;
+
     private String role;
 
     private Integer memberCount;

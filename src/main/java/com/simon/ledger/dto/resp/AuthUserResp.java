@@ -16,4 +16,6 @@ public class AuthUserResp {
     private String avatar;
 
     private Integer status;
+
+    private Integer version;
 }

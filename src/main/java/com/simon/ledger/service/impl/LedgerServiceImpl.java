@@ -248,6 +248,7 @@ public class LedgerServiceImpl extends ServiceImpl<LedgerMapper, Ledger> impleme
         resp.setNickname(user == null ? null : user.getNickname());
         resp.setAvatar(user == null ? null : user.getAvatar());
         resp.setRole(member.getRole());
+        resp.setVersion(member.getVersion());
         return resp;
     }
 
@@ -257,6 +258,7 @@ public class LedgerServiceImpl extends ServiceImpl<LedgerMapper, Ledger> impleme
         resp.setName(ledger.getName());
         resp.setBaseCurrencyCode(ledger.getBaseCurrencyCode());
         resp.setExchangeRateToCny(ledger.getExchangeRateToCny());
+        resp.setVersion(ledger.getVersion());
         resp.setRole(role);
         resp.setMemberCount(members.size());
         resp.setMembers(members);

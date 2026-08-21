@@ -19,5 +19,7 @@ public class MemberResp {
 
     private Integer status;
 
+    private Integer version;
+
     private LocalDateTime joinedAt;
 }
