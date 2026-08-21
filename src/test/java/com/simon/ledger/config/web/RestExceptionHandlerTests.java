@@ -6,6 +6,8 @@ import cn.dev33.satoken.exception.NotRoleException;
 import com.simon.ledger.common.ErrorCode;
 import com.simon.ledger.common.Result;
 import com.simon.ledger.common.exception.BusinessException;
+import com.simon.ledger.common.exception.VersionConflictException;
+import com.simon.ledger.dto.resp.ConflictResp;
 import jakarta.validation.ConstraintViolationException;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
@@ -14,8 +16,6 @@ import org.springframework.validation.BeanPropertyBindingResult;
 import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 
-import java.lang.reflect.Constructor;
-import java.lang.reflect.Method;
 import java.util.Collections;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -31,21 +31,22 @@ class RestExceptionHandlerTests {
         assertStatus(ErrorCode.NOT_FOUND, 404);
         assertStatus(ErrorCode.CONFLICT, 409);
         assertStatus(ErrorCode.SYSTEM_ERROR, 500);
-        assertStatus(ErrorCode.SUCCESS, 200);
     }
 
     @Test
-    void conflictReturnsStructuredPayloadAndConflictStatus() throws Exception {
-        Class<?> dtoType = Class.forName("com.simon.ledger.dto.resp.ConflictResp");
-        Constructor<?> dtoConstructor = dtoType.getConstructor(String.class, String.class, Integer.class,
-                Integer.class, Boolean.class, Object.class);
-        Object conflict = dtoConstructor.newInstance("transaction", "uuid-1", 2, 3, false,
+    void successCodeMisuseFailsClosedAsSystemError() {
+        ResponseEntity<?> response = handler.businessExceptionHandler(new BusinessException(ErrorCode.SUCCESS));
+        assertEquals(HttpStatus.INTERNAL_SERVER_ERROR, response.getStatusCode());
+        Result<?> body = (Result<?>) response.getBody();
+        assertEquals(ErrorCode.SYSTEM_ERROR.getCode(), body.getCode());
+        assertEquals(ErrorCode.SYSTEM_ERROR.getMessage(), body.getMessage());
+    }
+
+    @Test
+    void conflictReturnsStructuredPayloadAndConflictStatus() {
+        ConflictResp conflict = new ConflictResp("transaction", "uuid-1", 2, 3, false,
                 Collections.singletonMap("amount", 10));
-        Class<?> exceptionType = Class.forName("com.simon.ledger.common.exception.VersionConflictException");
-        Object exception = exceptionType.getConstructor(dtoType).newInstance(conflict);
-        ResponseEntity<?> response = (ResponseEntity<?>) handler.getClass()
-                .getMethod("businessExceptionHandler", BusinessException.class)
-                .invoke(handler, exception);
+        ResponseEntity<?> response = handler.businessExceptionHandler(new VersionConflictException(conflict));
         assertEquals(HttpStatus.CONFLICT, response.getStatusCode());
         Result<?> body = (Result<?>) response.getBody();
         assertEquals(409001, body.getCode());
@@ -82,6 +83,9 @@ class RestExceptionHandlerTests {
 
     private void assertStatus(ErrorCode code, int status) {
         assertHttpStatus(() -> handler.businessExceptionHandler(new BusinessException(code, "message")), status);
+        ResponseEntity<?> response = handler.businessExceptionHandler(new BusinessException(code, "message"));
+        assertNotNull(response.getBody());
+        assertNull(((Result<?>) response.getBody()).getData());
     }
 
     private void assertHttpStatus(ThrowingSupplier supplier, int status) {

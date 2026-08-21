@@ -14,25 +14,30 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 
+import java.util.UUID;
+
 @Slf4j
 @RestControllerAdvice
 public class RestExceptionHandler {
 
     @ExceptionHandler(BusinessException.class)
     public ResponseEntity<Result<?>> businessExceptionHandler(BusinessException e) {
-        log.warn("business exception: {}", e.getMessage());
+        log.warn("business exception code={}", e.getErrorCode());
+        if (e.getErrorCode() == ErrorCode.SUCCESS) {
+            return response(ErrorCode.SYSTEM_ERROR, ErrorCode.SYSTEM_ERROR.getMessage(), null);
+        }
         return response(e.getErrorCode(), e.getMessage(), e.getData());
     }
 
     @ExceptionHandler({NotRoleException.class, NotPermissionException.class})
     public ResponseEntity<Result<?>> permissionExceptionHandler(Exception e) {
-        log.warn("permission denied: {}", e.getMessage());
+        log.warn("permission denied type={}", e.getClass().getSimpleName());
         return response(ErrorCode.FORBIDDEN, ErrorCode.FORBIDDEN.getMessage(), null);
     }
 
     @ExceptionHandler(NotLoginException.class)
     public ResponseEntity<Result<?>> notLoginExceptionHandler(NotLoginException e) {
-        log.warn("not login: {}", e.getMessage());
+        log.warn("not login type={}", e.getClass().getSimpleName());
         return response(ErrorCode.UNAUTHORIZED, ErrorCode.UNAUTHORIZED.getMessage(), null);
     }
 
@@ -52,7 +57,7 @@ public class RestExceptionHandler {
 
     @ExceptionHandler(Exception.class)
     public ResponseEntity<Result<?>> exceptionHandler(Exception e) {
-        log.error("system exception", e);
+        log.error("system exception correlationId={}", UUID.randomUUID());
         return response(ErrorCode.SYSTEM_ERROR, ErrorCode.SYSTEM_ERROR.getMessage(), null);
     }
 
@@ -69,8 +74,7 @@ public class RestExceptionHandler {
             case NOT_FOUND -> HttpStatus.NOT_FOUND;
             case CONFLICT -> HttpStatus.CONFLICT;
             case SYSTEM_ERROR -> HttpStatus.INTERNAL_SERVER_ERROR;
-            case SUCCESS -> HttpStatus.OK;
-            default -> HttpStatus.OK;
+            case SUCCESS -> HttpStatus.INTERNAL_SERVER_ERROR;
         };
     }
 }
