@@ -11,46 +11,66 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 
 @Slf4j
 @RestControllerAdvice
 public class RestExceptionHandler {
 
     @ExceptionHandler(BusinessException.class)
-    public Result<Void> businessExceptionHandler(BusinessException e) {
+    public ResponseEntity<Result<?>> businessExceptionHandler(BusinessException e) {
         log.warn("business exception: {}", e.getMessage());
-        return Result.fail(e.getErrorCode(), e.getMessage());
+        return response(e.getErrorCode(), e.getMessage(), e.getData());
     }
 
     @ExceptionHandler({NotRoleException.class, NotPermissionException.class})
-    public Result<Void> permissionExceptionHandler(Exception e) {
+    public ResponseEntity<Result<?>> permissionExceptionHandler(Exception e) {
         log.warn("permission denied: {}", e.getMessage());
-        return Result.fail(ErrorCode.FORBIDDEN);
+        return response(ErrorCode.FORBIDDEN, ErrorCode.FORBIDDEN.getMessage(), null);
     }
 
     @ExceptionHandler(NotLoginException.class)
-    public Result<Void> notLoginExceptionHandler(NotLoginException e) {
+    public ResponseEntity<Result<?>> notLoginExceptionHandler(NotLoginException e) {
         log.warn("not login: {}", e.getMessage());
-        return Result.fail(ErrorCode.UNAUTHORIZED);
+        return response(ErrorCode.UNAUTHORIZED, ErrorCode.UNAUTHORIZED.getMessage(), null);
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
-    public Result<Void> methodArgumentNotValidExceptionHandler(MethodArgumentNotValidException e) {
+    public ResponseEntity<Result<?>> methodArgumentNotValidExceptionHandler(MethodArgumentNotValidException e) {
         String message = ErrorCode.BAD_REQUEST.getMessage();
         if (!e.getBindingResult().getAllErrors().isEmpty()) {
             message = e.getBindingResult().getAllErrors().getFirst().getDefaultMessage();
         }
-        return Result.fail(ErrorCode.BAD_REQUEST, message);
+        return response(ErrorCode.BAD_REQUEST, message, null);
     }
 
     @ExceptionHandler(ConstraintViolationException.class)
-    public Result<Void> constraintViolationExceptionHandler(ConstraintViolationException e) {
-        return Result.fail(ErrorCode.BAD_REQUEST, e.getMessage());
+    public ResponseEntity<Result<?>> constraintViolationExceptionHandler(ConstraintViolationException e) {
+        return response(ErrorCode.BAD_REQUEST, e.getMessage(), null);
     }
 
     @ExceptionHandler(Exception.class)
-    public Result<Void> exceptionHandler(Exception e) {
+    public ResponseEntity<Result<?>> exceptionHandler(Exception e) {
         log.error("system exception", e);
-        return Result.fail(ErrorCode.SYSTEM_ERROR);
+        return response(ErrorCode.SYSTEM_ERROR, ErrorCode.SYSTEM_ERROR.getMessage(), null);
+    }
+
+    private ResponseEntity<Result<?>> response(ErrorCode errorCode, String message, Object data) {
+        Result<?> result = Result.fail(errorCode, message, data);
+        return ResponseEntity.status(httpStatus(errorCode)).body(result);
+    }
+
+    private HttpStatus httpStatus(ErrorCode errorCode) {
+        return switch (errorCode) {
+            case BAD_REQUEST -> HttpStatus.BAD_REQUEST;
+            case UNAUTHORIZED -> HttpStatus.UNAUTHORIZED;
+            case FORBIDDEN -> HttpStatus.FORBIDDEN;
+            case NOT_FOUND -> HttpStatus.NOT_FOUND;
+            case CONFLICT -> HttpStatus.CONFLICT;
+            case SYSTEM_ERROR -> HttpStatus.INTERNAL_SERVER_ERROR;
+            case SUCCESS -> HttpStatus.OK;
+            default -> HttpStatus.OK;
+        };
     }
 }
