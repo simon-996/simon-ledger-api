@@ -44,7 +44,7 @@ public final class ConcurrencyFixtures {
     }
 
     public static AuthProfileUpdateReq profileReq(String nickname, int version) {
-        AuthProfileUpdateReq req = new AuthProfileUpdateReq(); req.setNickname(nickname); req.setVersion(version); return req;
+        AuthProfileUpdateReq req = new AuthProfileUpdateReq(); req.setNickname(nickname); req.setVersion(version); req.setAvatar(""); return req;
     }
 
     public static Ledger ledger() {
@@ -72,7 +72,8 @@ public final class ConcurrencyFixtures {
     public static LedgerMember genericMember() { return member("editor"); }
 
     public static LedgerMember member(long ledgerId, long userId, String role) {
-        LedgerMember member = member(role); member.setLedgerId(ledgerId); member.setUserId(userId); return member;
+        LedgerMember member = member(role); member.setId(41L + userId); member.setUuid("m-" + userId);
+        member.setLedgerId(ledgerId); member.setUserId(userId); member.setStatus(1); member.setVersion(1); return member;
     }
 
     public static LedgerMember ownerMember(long ledgerId, long userId) { return member(ledgerId, userId, "owner"); }
@@ -98,7 +99,8 @@ public final class ConcurrencyFixtures {
     }
 
     public static LedgerPerson person(long id, String uuid, int version, LocalDateTime deletedAt) {
-        LedgerPerson person = ledgerPerson(); person.setId(id); person.setUuid(uuid); person.setVersion(version); person.setDeletedAt(deletedAt); return person;
+        LedgerPerson person = ledgerPerson(); person.setId(id); person.setUuid(uuid); person.setLedgerId(11L);
+        person.setName("测试参与人"); person.setAvatar(""); person.setVersion(version); person.setDeletedAt(deletedAt); return person;
     }
 
     public static PersonUpdateReq personUpdateReq() {
@@ -118,7 +120,7 @@ public final class ConcurrencyFixtures {
     }
 
     public static LedgerTransaction transaction(long id, String uuid, long createdBy, int version, LocalDateTime deletedAt) {
-        LedgerTransaction transaction = ledgerTransaction(); transaction.setId(id); transaction.setUuid(uuid); transaction.setCreatedByUserId(createdBy);
+        LedgerTransaction transaction = ledgerTransaction(); transaction.setId(id); transaction.setUuid(uuid); transaction.setLedgerId(11L); transaction.setCreatedByUserId(createdBy);
         transaction.setVersion(version); transaction.setDeletedAt(deletedAt); return transaction;
     }
 }

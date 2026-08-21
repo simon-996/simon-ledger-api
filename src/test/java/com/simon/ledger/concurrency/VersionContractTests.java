@@ -23,6 +23,8 @@ import java.lang.reflect.Field;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotNull;
 
@@ -78,21 +80,24 @@ class VersionContractTests {
     @Test
     void versionMigrationOnlyAddsVersionsToMutableNonTransactionTables() throws Exception {
         String migration = Files.readString(Path.of("sql", "004_add_optimistic_versions.sql"));
-        assertTrue(migration.contains("ALTER TABLE user_account ADD COLUMN version INT NOT NULL DEFAULT 1 AFTER status;"));
-        assertTrue(migration.contains("ALTER TABLE ledger ADD COLUMN version INT NOT NULL DEFAULT 1 AFTER owner_user_id;"));
-        assertTrue(migration.contains("ALTER TABLE ledger_member ADD COLUMN version INT NOT NULL DEFAULT 1 AFTER status;"));
-        assertTrue(migration.contains("ALTER TABLE ledger_person ADD COLUMN version INT NOT NULL DEFAULT 1 AFTER avatar;"));
-        assertTrue(!migration.contains("ALTER TABLE ledger_transaction"));
+        List<String> statements = List.of(migration.replaceAll("(?m)--.*$", "").replaceAll("/\\*.*?\\*/", "")
+                .split(";"));
+        statements = statements.stream().map(s -> s.trim().replaceAll("\\s+", " ")).filter(s -> !s.isEmpty()).toList();
+        assertEquals(List.of("USE simon_ledger", "ALTER TABLE user_account ADD COLUMN version INT NOT NULL DEFAULT 1 AFTER status",
+                "ALTER TABLE ledger ADD COLUMN version INT NOT NULL DEFAULT 1 AFTER owner_user_id",
+                "ALTER TABLE ledger_member ADD COLUMN version INT NOT NULL DEFAULT 1 AFTER status",
+                "ALTER TABLE ledger_person ADD COLUMN version INT NOT NULL DEFAULT 1 AFTER avatar"), statements);
     }
 
     @Test
     void initialSchemaDeclaresVersionsForAllMutableTables() throws Exception {
         String schema = Files.readString(Path.of("sql", "001_init_schema.sql"));
-        assertTrue(schema.matches("(?s).*CREATE TABLE IF NOT EXISTS user_account.*?version\\s+INT\\s+NOT NULL\\s+DEFAULT 1.*"));
-        assertTrue(schema.matches("(?s).*CREATE TABLE IF NOT EXISTS ledger\\s*\\(.*?version\\s+INT\\s+NOT NULL\\s+DEFAULT 1.*"));
-        assertTrue(schema.matches("(?s).*CREATE TABLE IF NOT EXISTS ledger_member.*?version\\s+INT\\s+NOT NULL\\s+DEFAULT 1.*"));
-        assertTrue(schema.matches("(?s).*CREATE TABLE IF NOT EXISTS ledger_person.*?version\\s+INT\\s+NOT NULL\\s+DEFAULT 1.*"));
-        assertTrue(schema.matches("(?s).*CREATE TABLE IF NOT EXISTS ledger_transaction.*?version\\s+INT\\s+NOT NULL\\s+DEFAULT 1.*"));
+        for (String table : List.of("user_account", "ledger", "ledger_member", "ledger_person", "ledger_transaction")) {
+            Matcher start = Pattern.compile("(?s)CREATE TABLE IF NOT EXISTS " + table + "\\s*\\(.*?ENGINE\\s*=\\s*InnoDB\\s*;?").matcher(schema);
+            assertTrue(start.find(), table);
+            String block = start.group();
+            assertEquals(1, block.split("(?i)version\\s+INT\\s+NOT NULL\\s+DEFAULT 1", -1).length - 1, table);
+        }
     }
 
     @Test
@@ -100,12 +105,27 @@ class VersionContractTests {
         assertEquals(7L, ConcurrencyFixtures.user(7, "u", "n", 3).getId());
         assertEquals(3, ConcurrencyFixtures.user(7, "u", "n", 3).getVersion());
         assertEquals(9, ConcurrencyFixtures.profileReq("n", 9).getVersion());
+        assertEquals("", ConcurrencyFixtures.profileReq("n", 9).getAvatar());
         assertEquals(8L, ConcurrencyFixtures.ledger(8, "l").getId());
         assertEquals(4, ConcurrencyFixtures.ledger(8, "l", 4, null).getVersion());
-        assertEquals(2L, ConcurrencyFixtures.ownerMember(1, 2).getUserId());
+        var member = ConcurrencyFixtures.ownerMember(1, 2);
+        assertEquals(43L, member.getId());
+        assertEquals("m-2", member.getUuid());
+        assertEquals(1L, member.getLedgerId());
+        assertEquals(2L, member.getUserId());
+        assertEquals("owner", member.getRole());
+        assertEquals(1, member.getStatus());
+        assertEquals(1, member.getVersion());
         assertEquals(5, ConcurrencyFixtures.deleteReq(5).getVersion());
-        assertEquals(6, ConcurrencyFixtures.person(3, "p", 6, null).getVersion());
+        var person = ConcurrencyFixtures.person(3, "p", 6, null);
+        assertEquals(11L, person.getLedgerId());
+        assertEquals("测试参与人", person.getName());
+        assertEquals("", person.getAvatar());
+        assertEquals(6, person.getVersion());
         assertEquals(7, ConcurrencyFixtures.personReq("p", 7).getVersion());
-        assertEquals(8, ConcurrencyFixtures.transaction(4, "t", 2, 8, null).getVersion());
+        var transaction = ConcurrencyFixtures.transaction(4, "t", 2, 8, null);
+        assertEquals(11L, transaction.getLedgerId());
+        assertEquals(2L, transaction.getCreatedByUserId());
+        assertEquals(8, transaction.getVersion());
     }
 }
