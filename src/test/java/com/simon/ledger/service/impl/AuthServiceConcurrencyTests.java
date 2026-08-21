@@ -148,14 +148,23 @@ class AuthServiceConcurrencyTests {
     }
 
     @Test
-    void personChangeLogIsSkippedWhenServerDerivedSyncDoesNotUpdate() {
+    void unlinkedPersonSelectedBeforeRaceIsGuardedAndNotLogged() {
         when(userAccountMapper.selectById(7L)).thenReturn(user(2));
         when(userAccountMapper.update(isNull(), any())).thenReturn(1);
         when(ledgerPersonMapper.selectList(any())).thenReturn(List.of(person()));
+        // The selected row belonged to this profile, but a concurrent transaction unlinked it before this update.
         when(ledgerPersonMapper.update(isNull(), any())).thenReturn(0);
 
         withLoggedInUser(() -> service.updateProfile(request(2)));
 
+        ArgumentCaptor<LambdaUpdateWrapper<LedgerPerson>> captor = personUpdateCaptor();
+        verify(ledgerPersonMapper).update(isNull(), captor.capture());
+        LambdaUpdateWrapper<LedgerPerson> wrapper = captor.getValue();
+        assertTrue(wrapper.getSqlSegment().contains("id"));
+        assertTrue(wrapper.getSqlSegment().contains("linked_user_id"));
+        assertTrue(wrapper.getSqlSegment().contains("deleted_at IS NULL"));
+        assertTrue(wrapper.getParamNameValuePairs().containsValue(8L));
+        assertTrue(wrapper.getParamNameValuePairs().containsValue(7L));
         verify(changeLogService, never()).record(any(), any(), any(), any(), any());
     }
 

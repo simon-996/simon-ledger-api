@@ -158,13 +158,15 @@ public class AuthServiceImpl extends ServiceImpl<UserAccountMapper, UserAccount>
         List<LedgerPerson> people = ledgerPersonMapper.selectList(Wrappers.<LedgerPerson>lambdaQuery()
                 .eq(LedgerPerson::getLinkedUserId, userId)
                 .isNull(LedgerPerson::getDeletedAt));
+        LocalDateTime peopleUpdatedAt = LocalDateTime.now();
         for (LedgerPerson person : people) {
             int affected = ledgerPersonMapper.update(null, Wrappers.<LedgerPerson>lambdaUpdate()
                     .eq(LedgerPerson::getId, person.getId())
+                    .eq(LedgerPerson::getLinkedUserId, userId)
                     .isNull(LedgerPerson::getDeletedAt)
                     .set(LedgerPerson::getName, user.getNickname())
                     .set(LedgerPerson::getAvatar, user.getAvatar() == null ? "" : user.getAvatar())
-                    .set(LedgerPerson::getUpdatedAt, LocalDateTime.now())
+                    .set(LedgerPerson::getUpdatedAt, peopleUpdatedAt)
                     .setSql("version = version + 1"));
             if (affected == 1) {
                 changeLogService.record(person.getLedgerId(), "person", person.getUuid(), "update", userId);
