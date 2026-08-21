@@ -1,6 +1,7 @@
 target/
 logs/
 upload/
+.worktrees/
 
 .idea/
 *.iml
