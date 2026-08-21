@@ -35,4 +35,26 @@ public final class LedgerRoles {
     public static boolean isValidJoinableRole(String role) {
         return JOINABLE_ROLES.contains(role);
     }
+
+    public static boolean canAssignRole(String operatorRole, String targetRole, String newRole) {
+        if (!isValidJoinableRole(newRole) || OWNER.equals(targetRole)) {
+            return false;
+        }
+        if (OWNER.equals(operatorRole)) {
+            return true;
+        }
+        return ADMIN.equals(operatorRole)
+                && (EDITOR.equals(targetRole) || VIEWER.equals(targetRole))
+                && (EDITOR.equals(newRole) || VIEWER.equals(newRole));
+    }
+
+    public static boolean canRemoveRole(String operatorRole, String targetRole) {
+        if (OWNER.equals(targetRole)) {
+            return false;
+        }
+        if (OWNER.equals(operatorRole)) {
+            return true;
+        }
+        return ADMIN.equals(operatorRole) && (EDITOR.equals(targetRole) || VIEWER.equals(targetRole));
+    }
 }
