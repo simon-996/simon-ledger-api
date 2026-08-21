@@ -2,18 +2,24 @@ package com.simon.ledger.service.impl;
 
 import cn.dev33.satoken.stp.StpUtil;
 import cn.hutool.core.util.IdUtil;
+import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.simon.ledger.common.ErrorCode;
 import com.simon.ledger.common.LedgerRoles;
 import com.simon.ledger.common.exception.BusinessException;
+import com.simon.ledger.common.exception.VersionConflictException;
 import com.simon.ledger.dto.req.LedgerCreateReq;
 import com.simon.ledger.dto.req.LedgerCreateWithPeopleReq;
 import com.simon.ledger.dto.req.LedgerUpdateReq;
 import com.simon.ledger.dto.req.PersonCreateReq;
+import com.simon.ledger.dto.req.VersionDeleteReq;
+import com.simon.ledger.dto.resp.ConflictResp;
 import com.simon.ledger.dto.resp.LedgerMemberSummaryResp;
 import com.simon.ledger.dto.resp.LedgerCreateWithPeopleResp;
 import com.simon.ledger.dto.resp.LedgerResp;
+import com.simon.ledger.dto.resp.MemberResp;
 import com.simon.ledger.dto.resp.PersonResp;
+import com.simon.ledger.dto.resp.VersionMutationResp;
 import com.simon.ledger.entity.Ledger;
 import com.simon.ledger.entity.LedgerMember;
 import com.simon.ledger.entity.UserAccount;
@@ -128,57 +134,156 @@ public class LedgerServiceImpl extends ServiceImpl<LedgerMapper, Ledger> impleme
     @Transactional(rollbackFor = Exception.class)
     public LedgerResp update(String ledgerUuid, LedgerUpdateReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
-        Ledger ledger = requireLedger(ledgerUuid);
+        Ledger ledger = requireLedgerForMutation(ledgerUuid);
         LedgerMember member = requireActiveMember(ledger.getId(), userId);
         if (!LedgerRoles.canManageLedger(member.getRole())) {
             throw new BusinessException(ErrorCode.FORBIDDEN);
         }
+        if (ledger.getDeletedAt() != null || !ledger.getVersion().equals(req.getVersion())) {
+            throw ledgerConflict(ledger, member.getRole(), req.getVersion());
+        }
 
-        ledger.setName(req.getName().trim());
-        ledger.setBaseCurrencyCode(req.getBaseCurrencyCode().trim().toUpperCase());
+        String name = req.getName().trim();
+        String currencyCode = req.getBaseCurrencyCode().trim().toUpperCase();
+        LocalDateTime updatedAt = LocalDateTime.now();
+        int nextVersion = req.getVersion() + 1;
+        int affected = baseMapper.update(null, Wrappers.<Ledger>lambdaUpdate()
+                .eq(Ledger::getId, ledger.getId())
+                .eq(Ledger::getVersion, req.getVersion())
+                .isNull(Ledger::getDeletedAt)
+                .set(Ledger::getName, name)
+                .set(Ledger::getBaseCurrencyCode, currencyCode)
+                .set(Ledger::getExchangeRateToCny, req.getExchangeRateToCny())
+                .set(Ledger::getVersion, nextVersion)
+                .set(Ledger::getUpdatedAt, updatedAt));
+        if (affected == 0) {
+            throw ledgerConflict(reloadLedgerForUpdate(ledger.getId(), ledgerUuid), member.getRole(), req.getVersion());
+        }
+        ledger.setName(name);
+        ledger.setBaseCurrencyCode(currencyCode);
         ledger.setExchangeRateToCny(req.getExchangeRateToCny());
-        updateById(ledger);
+        ledger.setVersion(nextVersion);
+        ledger.setUpdatedAt(updatedAt);
         changeLogService.record(ledger.getId(), "ledger", ledger.getUuid(), "update", userId);
         return toResp(ledger, member.getRole(), membersMap(List.of(ledger.getId())).getOrDefault(ledger.getId(), List.of()));
     }
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public void delete(String ledgerUuid) {
+    public VersionMutationResp delete(String ledgerUuid, VersionDeleteReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
-        Ledger ledger = requireLedger(ledgerUuid);
+        Ledger ledger = requireLedgerForMutation(ledgerUuid);
         LedgerMember member = requireActiveMember(ledger.getId(), userId);
         if (!LedgerRoles.isOwner(member.getRole())) {
             throw new BusinessException(ErrorCode.FORBIDDEN);
         }
+        if (ledger.getDeletedAt() != null || !ledger.getVersion().equals(req.getVersion())) {
+            throw ledgerConflict(ledger, member.getRole(), req.getVersion());
+        }
 
-        ledger.setDeletedAt(LocalDateTime.now());
-        updateById(ledger);
+        LocalDateTime updatedAt = LocalDateTime.now();
+        int nextVersion = req.getVersion() + 1;
+        int affected = baseMapper.update(null, Wrappers.<Ledger>lambdaUpdate()
+                .eq(Ledger::getId, ledger.getId())
+                .eq(Ledger::getVersion, req.getVersion())
+                .isNull(Ledger::getDeletedAt)
+                .set(Ledger::getDeletedAt, updatedAt)
+                .set(Ledger::getUpdatedAt, updatedAt)
+                .set(Ledger::getVersion, nextVersion));
+        if (affected == 0) {
+            throw ledgerConflict(reloadLedgerForUpdate(ledger.getId(), ledgerUuid), member.getRole(), req.getVersion());
+        }
+        ledger.setDeletedAt(updatedAt);
+        ledger.setUpdatedAt(updatedAt);
+        ledger.setVersion(nextVersion);
         changeLogService.record(ledger.getId(), "ledger", ledger.getUuid(), "delete", userId);
+        return new VersionMutationResp(ledger.getUuid(), nextVersion, true);
     }
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public void leave(String ledgerUuid) {
+    public LedgerResp restore(String ledgerUuid, LedgerUpdateReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
-        Ledger ledger = requireLedger(ledgerUuid);
-        LedgerMember member = ledgerMemberMapper.selectOne(com.baomidou.mybatisplus.core.toolkit.Wrappers.<LedgerMember>lambdaQuery()
+        Ledger ledger = requireLedgerForMutation(ledgerUuid);
+        LedgerMember member = requireActiveMember(ledger.getId(), userId);
+        if (!LedgerRoles.isOwner(member.getRole())) {
+            throw new BusinessException(ErrorCode.FORBIDDEN);
+        }
+        if (ledger.getDeletedAt() == null || !ledger.getVersion().equals(req.getVersion())) {
+            throw ledgerConflict(ledger, member.getRole(), req.getVersion());
+        }
+
+        String name = req.getName().trim();
+        String currencyCode = req.getBaseCurrencyCode().trim().toUpperCase();
+        LocalDateTime updatedAt = LocalDateTime.now();
+        int nextVersion = req.getVersion() + 1;
+        int affected = baseMapper.update(null, Wrappers.<Ledger>lambdaUpdate()
+                .eq(Ledger::getId, ledger.getId())
+                .eq(Ledger::getVersion, req.getVersion())
+                .isNotNull(Ledger::getDeletedAt)
+                .set(Ledger::getName, name)
+                .set(Ledger::getBaseCurrencyCode, currencyCode)
+                .set(Ledger::getExchangeRateToCny, req.getExchangeRateToCny())
+                .set(Ledger::getDeletedAt, null)
+                .set(Ledger::getUpdatedAt, updatedAt)
+                .set(Ledger::getVersion, nextVersion));
+        if (affected == 0) {
+            throw ledgerConflict(reloadLedgerForUpdate(ledger.getId(), ledgerUuid), member.getRole(), req.getVersion());
+        }
+        ledger.setName(name);
+        ledger.setBaseCurrencyCode(currencyCode);
+        ledger.setExchangeRateToCny(req.getExchangeRateToCny());
+        ledger.setDeletedAt(null);
+        ledger.setUpdatedAt(updatedAt);
+        ledger.setVersion(nextVersion);
+        changeLogService.record(ledger.getId(), "ledger", ledger.getUuid(), "update", userId);
+        return toResp(ledger, member.getRole(), membersMap(List.of(ledger.getId())).getOrDefault(ledger.getId(), List.of()));
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public VersionMutationResp leave(String ledgerUuid, VersionDeleteReq req) {
+        Long userId = StpUtil.getLoginIdAsLong();
+        Ledger ledger = requireLedgerForMutation(ledgerUuid);
+        LedgerMember member = ledgerMemberMapper.selectOne(Wrappers.<LedgerMember>lambdaQuery()
                 .eq(LedgerMember::getLedgerId, ledger.getId())
-                .eq(LedgerMember::getUserId, userId)
-                .eq(LedgerMember::getStatus, MEMBER_STATUS_ACTIVE));
+                .eq(LedgerMember::getUserId, userId));
         if (member == null) {
             throw new BusinessException(ErrorCode.FORBIDDEN);
         }
-        if (member.getDeletedAt() != null) {
-            return;
+        if (member.getDeletedAt() != null || !member.getVersion().equals(req.getVersion())) {
+            throw memberConflict(member, req.getVersion());
         }
         if (LedgerRoles.isOwner(member.getRole())) {
             throw new BusinessException(ErrorCode.FORBIDDEN, "owner 不能退出账本");
         }
+        if (!Integer.valueOf(MEMBER_STATUS_ACTIVE).equals(member.getStatus())) {
+            throw new BusinessException(ErrorCode.FORBIDDEN);
+        }
 
-        member.setDeletedAt(LocalDateTime.now());
-        ledgerMemberMapper.updateById(member);
+        LocalDateTime updatedAt = LocalDateTime.now();
+        int nextVersion = req.getVersion() + 1;
+        int affected = ledgerMemberMapper.update(null, Wrappers.<LedgerMember>lambdaUpdate()
+                .eq(LedgerMember::getId, member.getId())
+                .eq(LedgerMember::getVersion, req.getVersion())
+                .isNull(LedgerMember::getDeletedAt)
+                .set(LedgerMember::getDeletedAt, updatedAt)
+                .set(LedgerMember::getUpdatedAt, updatedAt)
+                .set(LedgerMember::getVersion, nextVersion));
+        if (affected == 0) {
+            LedgerMember latest = ledgerMemberMapper.selectOne(Wrappers.<LedgerMember>lambdaQuery()
+                    .eq(LedgerMember::getId, member.getId())
+                    .last("FOR UPDATE"));
+            if (latest == null) {
+                throw new BusinessException(ErrorCode.FORBIDDEN);
+            }
+            throw memberConflict(latest, req.getVersion());
+        }
+        member.setDeletedAt(updatedAt);
+        member.setUpdatedAt(updatedAt);
+        member.setVersion(nextVersion);
         changeLogService.record(ledger.getId(), "member", member.getUuid(), "delete", userId);
+        return new VersionMutationResp(member.getUuid(), nextVersion, true);
     }
 
     private List<LedgerMember> activeMembersByUserId(Long userId) {
@@ -197,6 +302,25 @@ public class LedgerServiceImpl extends ServiceImpl<LedgerMapper, Ledger> impleme
             throw new BusinessException(ErrorCode.NOT_FOUND, "账本不存在");
         }
         return ledger;
+    }
+
+    private Ledger requireLedgerForMutation(String ledgerUuid) {
+        Ledger ledger = baseMapper.selectOne(Wrappers.<Ledger>lambdaQuery()
+                .eq(Ledger::getUuid, ledgerUuid));
+        if (ledger == null) {
+            throw new BusinessException(ErrorCode.NOT_FOUND, "账本不存在");
+        }
+        return ledger;
+    }
+
+    private Ledger reloadLedgerForUpdate(Long ledgerId, String ledgerUuid) {
+        Ledger latest = baseMapper.selectOne(Wrappers.<Ledger>lambdaQuery()
+                .eq(Ledger::getId, ledgerId)
+                .last("FOR UPDATE"));
+        if (latest == null) {
+            throw new BusinessException(ErrorCode.NOT_FOUND, "账本不存在: " + ledgerUuid);
+        }
+        return latest;
     }
 
     private LedgerMember requireActiveMember(Long ledgerId, Long userId) {
@@ -250,6 +374,41 @@ public class LedgerServiceImpl extends ServiceImpl<LedgerMapper, Ledger> impleme
         resp.setRole(member.getRole());
         resp.setVersion(member.getVersion());
         return resp;
+    }
+
+    private VersionConflictException ledgerConflict(Ledger ledger, String role, Integer submittedVersion) {
+        List<LedgerMemberSummaryResp> members = membersMap(List.of(ledger.getId()))
+                .getOrDefault(ledger.getId(), List.of());
+        LedgerResp snapshot = toResp(ledger, role, members);
+        return new VersionConflictException(new ConflictResp(
+                "ledger",
+                ledger.getUuid(),
+                submittedVersion,
+                ledger.getVersion(),
+                ledger.getDeletedAt() != null,
+                snapshot
+        ));
+    }
+
+    private VersionConflictException memberConflict(LedgerMember member, Integer submittedVersion) {
+        UserAccount user = userAccountMapper.selectById(member.getUserId());
+        MemberResp snapshot = new MemberResp();
+        snapshot.setUuid(member.getUuid());
+        snapshot.setUserUuid(user == null ? null : user.getUuid());
+        snapshot.setNickname(user == null ? null : user.getNickname());
+        snapshot.setAvatar(user == null ? null : user.getAvatar());
+        snapshot.setRole(member.getRole());
+        snapshot.setStatus(member.getStatus());
+        snapshot.setJoinedAt(member.getJoinedAt());
+        snapshot.setVersion(member.getVersion());
+        return new VersionConflictException(new ConflictResp(
+                "member",
+                member.getUuid(),
+                submittedVersion,
+                member.getVersion(),
+                member.getDeletedAt() != null,
+                snapshot
+        ));
     }
 
     private LedgerResp toResp(Ledger ledger, String role, List<LedgerMemberSummaryResp> members) {

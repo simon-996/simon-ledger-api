@@ -4,8 +4,10 @@ import com.simon.ledger.common.Result;
 import com.simon.ledger.dto.req.LedgerCreateReq;
 import com.simon.ledger.dto.req.LedgerCreateWithPeopleReq;
 import com.simon.ledger.dto.req.LedgerUpdateReq;
+import com.simon.ledger.dto.req.VersionDeleteReq;
 import com.simon.ledger.dto.resp.LedgerCreateWithPeopleResp;
 import com.simon.ledger.dto.resp.LedgerResp;
+import com.simon.ledger.dto.resp.VersionMutationResp;
 import com.simon.ledger.service.IdempotencyService;
 import com.simon.ledger.service.LedgerService;
 import io.swagger.v3.oas.annotations.Operation;
@@ -93,31 +95,49 @@ public class LedgerController {
 
     @Operation(summary = "删除账本")
     @DeleteMapping("/{ledgerUuid}")
-    public Result<Void> delete(
+    public Result<VersionMutationResp> delete(
             @PathVariable String ledgerUuid,
-            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            @Valid @RequestBody VersionDeleteReq req
     ) {
-        idempotencyService.executeVoid(
+        return Result.ok(idempotencyService.execute(
                 idempotencyKey,
                 "DELETE",
                 "/api/ledgers/" + ledgerUuid,
-                () -> ledgerService.delete(ledgerUuid)
-        );
-        return Result.ok();
+                VersionMutationResp.class,
+                () -> ledgerService.delete(ledgerUuid, req)
+        ));
+    }
+
+    @Operation(summary = "恢复账本")
+    @PostMapping("/{ledgerUuid}/restore")
+    public Result<LedgerResp> restore(
+            @PathVariable String ledgerUuid,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            @Valid @RequestBody LedgerUpdateReq req
+    ) {
+        return Result.ok(idempotencyService.execute(
+                idempotencyKey,
+                "POST",
+                "/api/ledgers/" + ledgerUuid + "/restore",
+                LedgerResp.class,
+                () -> ledgerService.restore(ledgerUuid, req)
+        ));
     }
 
     @Operation(summary = "退出共享账本")
     @PostMapping("/{ledgerUuid}/leave")
-    public Result<Void> leave(
+    public Result<VersionMutationResp> leave(
             @PathVariable String ledgerUuid,
-            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            @Valid @RequestBody VersionDeleteReq req
     ) {
-        idempotencyService.executeVoid(
+        return Result.ok(idempotencyService.execute(
                 idempotencyKey,
                 "POST",
                 "/api/ledgers/" + ledgerUuid + "/leave",
-                () -> ledgerService.leave(ledgerUuid)
-        );
-        return Result.ok();
+                VersionMutationResp.class,
+                () -> ledgerService.leave(ledgerUuid, req)
+        ));
     }
 }

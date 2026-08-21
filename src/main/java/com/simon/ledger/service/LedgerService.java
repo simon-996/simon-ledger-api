@@ -3,8 +3,10 @@ package com.simon.ledger.service;
 import com.simon.ledger.dto.req.LedgerCreateReq;
 import com.simon.ledger.dto.req.LedgerCreateWithPeopleReq;
 import com.simon.ledger.dto.req.LedgerUpdateReq;
+import com.simon.ledger.dto.req.VersionDeleteReq;
 import com.simon.ledger.dto.resp.LedgerCreateWithPeopleResp;
 import com.simon.ledger.dto.resp.LedgerResp;
+import com.simon.ledger.dto.resp.VersionMutationResp;
 
 import java.util.List;
 
@@ -20,7 +22,9 @@ public interface LedgerService {
 
     LedgerResp update(String ledgerUuid, LedgerUpdateReq req);
 
-    void delete(String ledgerUuid);
+    VersionMutationResp delete(String ledgerUuid, VersionDeleteReq req);
 
-    void leave(String ledgerUuid);
+    LedgerResp restore(String ledgerUuid, LedgerUpdateReq req);
+
+    VersionMutationResp leave(String ledgerUuid, VersionDeleteReq req);
 }
