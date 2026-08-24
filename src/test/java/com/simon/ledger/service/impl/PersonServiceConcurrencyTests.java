@@ -321,19 +321,26 @@ class PersonServiceConcurrencyTests {
         stubLedgerAndOperator(LedgerRoles.OWNER);
         when(personMapper.selectOne(any())).thenReturn(initial, null, latest);
         when(personMapper.update(isNull(), any())).thenReturn(0);
-        when(userMapper.selectById(9L)).thenReturn(user(9L, "latest-linked-user"));
+        when(userMapper.selectOne(any())).thenReturn(user(9L, "latest-linked-user"));
 
         VersionConflictException exception = assertThrows(VersionConflictException.class,
                 () -> loggedIn(() -> service.update("ledger-uuid", "person-uuid",
                         updateReq(4, "Requested", "", null))));
 
-        assertPersonConflict(exception, 4, 5, false, "latest-linked-user", "Profile Updated");
         ArgumentCaptor<Wrapper<LedgerPerson>> reads = personWrapperCaptor();
         verify(personMapper, times(3)).selectOne(reads.capture());
         AbstractWrapper<?, ?, ?> reload = (AbstractWrapper<?, ?, ?>) reads.getAllValues().get(2);
         assertTrue(reload.getSqlSegment().contains("FOR UPDATE"));
         assertTrue(reload.getSqlSegment().matches("(?s).*\\bid\\b\\s*=.*"));
         assertTrue(reload.getParamNameValuePairs().containsValue(22L));
+        ArgumentCaptor<Wrapper<UserAccount>> linkedUserRead = userWrapperCaptor();
+        verify(userMapper).selectOne(linkedUserRead.capture());
+        AbstractWrapper<?, ?, ?> linkedUserWrapper = (AbstractWrapper<?, ?, ?>) linkedUserRead.getValue();
+        assertTrue(linkedUserWrapper.getSqlSegment().contains("FOR UPDATE"));
+        assertTrue(linkedUserWrapper.getSqlSegment().matches("(?s).*\\bid\\b\\s*=.*"));
+        assertTrue(linkedUserWrapper.getParamNameValuePairs().containsValue(9L));
+        verify(userMapper, never()).selectById(any());
+        assertPersonConflict(exception, 4, 5, false, "latest-linked-user", "Profile Updated");
         verify(changeLogService, never()).record(any(), any(), any(), any(), any());
     }
 
@@ -630,6 +637,11 @@ class PersonServiceConcurrencyTests {
 
     @SuppressWarnings({"unchecked", "rawtypes"})
     private ArgumentCaptor<Wrapper<LedgerMember>> memberWrapperCaptor() {
+        return (ArgumentCaptor) ArgumentCaptor.forClass(Wrapper.class);
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private ArgumentCaptor<Wrapper<UserAccount>> userWrapperCaptor() {
         return (ArgumentCaptor) ArgumentCaptor.forClass(Wrapper.class);
     }
 

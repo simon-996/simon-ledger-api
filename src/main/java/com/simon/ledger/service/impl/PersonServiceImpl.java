@@ -420,7 +420,9 @@ public class PersonServiceImpl extends ServiceImpl<LedgerPersonMapper, LedgerPer
     private VersionConflictException personConflict(Ledger ledger, LedgerPerson person, Integer submittedVersion) {
         UserAccount linkedUser = person.getLinkedUserId() == null
                 ? null
-                : userAccountMapper.selectById(person.getLinkedUserId());
+                : userAccountMapper.selectOne(Wrappers.<UserAccount>lambdaQuery()
+                        .eq(UserAccount::getId, person.getLinkedUserId())
+                        .last("FOR UPDATE"));
         PersonResp snapshot = toResp(ledger, person, linkedUser);
         return new VersionConflictException(new ConflictResp(
                 "person",
