@@ -2,6 +2,7 @@ package com.simon.ledger.service.impl;
 
 import cn.dev33.satoken.stp.StpUtil;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
+import com.baomidou.mybatisplus.core.conditions.AbstractWrapper;
 import com.baomidou.mybatisplus.core.conditions.Wrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
@@ -11,8 +12,10 @@ import com.simon.ledger.common.exception.VersionConflictException;
 import com.simon.ledger.dto.req.AuthProfileUpdateReq;
 import com.simon.ledger.dto.resp.AuthUserResp;
 import com.simon.ledger.dto.resp.ConflictResp;
+import com.simon.ledger.entity.Ledger;
 import com.simon.ledger.entity.LedgerPerson;
 import com.simon.ledger.entity.UserAccount;
+import com.simon.ledger.mapper.LedgerMapper;
 import com.simon.ledger.mapper.LedgerPersonMapper;
 import com.simon.ledger.mapper.UserAccountMapper;
 import com.simon.ledger.service.ChangeLogService;
@@ -21,6 +24,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -41,6 +45,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -52,6 +58,8 @@ class AuthServiceConcurrencyTests {
     @Mock
     private LedgerPersonMapper ledgerPersonMapper;
     @Mock
+    private LedgerMapper ledgerMapper;
+    @Mock
     private ChangeLogService changeLogService;
 
     private AuthServiceImpl service;
@@ -59,8 +67,9 @@ class AuthServiceConcurrencyTests {
     @BeforeEach
     void setUp() {
         initializeLambdaMetadata(UserAccount.class);
+        initializeLambdaMetadata(Ledger.class);
         initializeLambdaMetadata(LedgerPerson.class);
-        service = new AuthServiceImpl(ledgerPersonMapper, changeLogService);
+        service = new AuthServiceImpl(ledgerPersonMapper, ledgerMapper, changeLogService);
         ReflectionTestUtils.setField(service, "baseMapper", userAccountMapper);
     }
 
@@ -74,7 +83,9 @@ class AuthServiceConcurrencyTests {
     void matchingVersionUpdatesProfileAtomicallyAndReturnsIncrementedVersion() {
         UserAccount user = user(2);
         LedgerPerson person = person();
-        when(userAccountMapper.selectById(7L)).thenReturn(user);
+        when(ledgerPersonMapper.selectObjs(any())).thenReturn(List.of(11L));
+        when(ledgerMapper.selectList(any())).thenReturn(List.of(ledger(11L)));
+        when(userAccountMapper.selectOne(any())).thenReturn(user);
         when(userAccountMapper.update(isNull(), any())).thenReturn(1);
         when(ledgerPersonMapper.selectList(any())).thenReturn(List.of(person));
         when(ledgerPersonMapper.update(isNull(), any())).thenReturn(1);
@@ -94,9 +105,68 @@ class AuthServiceConcurrencyTests {
     }
 
     @Test
+    void locksDistinctLedgersInIdOrderBeforeCurrentUserPeopleAndChangeLogs() {
+        UserAccount user = user(2);
+        LedgerPerson first = person(8L, "person-first", 11L);
+        LedgerPerson second = person(9L, "person-second", 22L);
+        when(ledgerPersonMapper.selectObjs(any())).thenReturn(List.of(22L, 11L, 22L));
+        when(ledgerMapper.selectList(any())).thenReturn(List.of(ledger(11L), ledger(22L)));
+        when(userAccountMapper.selectOne(any())).thenReturn(user);
+        when(userAccountMapper.update(isNull(), any())).thenReturn(1);
+        when(ledgerPersonMapper.selectList(any())).thenReturn(List.of(first, second));
+        when(ledgerPersonMapper.update(isNull(), any())).thenReturn(1);
+
+        withLoggedInUser(() -> service.updateProfile(request(2)));
+
+        ArgumentCaptor<Wrapper<LedgerPerson>> discovery = personWrapperCaptor();
+        ArgumentCaptor<Wrapper<Ledger>> ledgerLock = ledgerWrapperCaptor();
+        ArgumentCaptor<Wrapper<UserAccount>> userLock = wrapperCaptor();
+        ArgumentCaptor<Wrapper<LedgerPerson>> peopleLock = personWrapperCaptor();
+        InOrder order = inOrder(ledgerPersonMapper, ledgerMapper, userAccountMapper, changeLogService);
+        order.verify(ledgerPersonMapper).selectObjs(discovery.capture());
+        order.verify(ledgerMapper).selectList(ledgerLock.capture());
+        order.verify(userAccountMapper).selectOne(userLock.capture());
+        order.verify(userAccountMapper).update(isNull(), any());
+        order.verify(ledgerPersonMapper).selectList(peopleLock.capture());
+        order.verify(ledgerPersonMapper).update(isNull(), any());
+        order.verify(changeLogService).record(11L, "person", "person-first", "update", 7L);
+        order.verify(ledgerPersonMapper).update(isNull(), any());
+        order.verify(changeLogService).record(22L, "person", "person-second", "update", 7L);
+
+        assertDiscoveryRead(discovery.getValue());
+        assertLedgerNamespaceLock(ledgerLock.getValue(), 11L, 22L);
+        assertCurrentUserLock(userLock.getValue());
+        assertCurrentPeopleLock(peopleLock.getValue());
+        verify(userAccountMapper, never()).selectById(7L);
+    }
+
+    @Test
+    void noVisibleLinkOrFutureUncommittedLinkLetsProfileWinUserAndSkipsLedgerLock() {
+        UserAccount user = user(2);
+        // A Person mutation that has not linked yet may already hold its ledger lock. Because this
+        // profile wins the user lock, it linearizes first; that Person mutation links after commit.
+        when(ledgerPersonMapper.selectObjs(any())).thenReturn(List.of());
+        when(userAccountMapper.selectOne(any())).thenReturn(user);
+        when(userAccountMapper.update(isNull(), any())).thenReturn(1);
+        when(ledgerPersonMapper.selectList(any())).thenReturn(List.of());
+
+        AuthUserResp response = withLoggedInUser(() -> service.updateProfile(request(2)));
+
+        assertEquals(3, response.getVersion());
+        verify(ledgerMapper, never()).selectList(any());
+        ArgumentCaptor<Wrapper<UserAccount>> userLock = wrapperCaptor();
+        verify(userAccountMapper).selectOne(userLock.capture());
+        assertCurrentUserLock(userLock.getValue());
+        ArgumentCaptor<Wrapper<LedgerPerson>> peopleLock = personWrapperCaptor();
+        verify(ledgerPersonMapper).selectList(peopleLock.capture());
+        assertCurrentPeopleLock(peopleLock.getValue());
+        verify(changeLogService, never()).record(any(), any(), any(), any(), any());
+    }
+
+    @Test
     void initialStaleVersionThrowsSafeConflictWithoutAttemptingUpdate() {
         UserAccount user = user(3);
-        when(userAccountMapper.selectById(7L)).thenReturn(user);
+        when(userAccountMapper.selectOne(any())).thenReturn(user);
 
         VersionConflictException exception = assertThrows(VersionConflictException.class,
                 () -> withLoggedInUser(() -> service.updateProfile(request(2))));
@@ -112,47 +182,47 @@ class AuthServiceConcurrencyTests {
         UserAccount remote = user(4);
         remote.setNickname("remote nickname");
         remote.setAvatar("https://example.test/remote.png");
-        when(userAccountMapper.selectById(7L)).thenReturn(initial);
+        when(userAccountMapper.selectOne(any())).thenReturn(initial, remote);
         when(userAccountMapper.update(isNull(), any())).thenReturn(0);
-        when(userAccountMapper.selectOne(any())).thenReturn(remote);
 
         VersionConflictException exception = assertThrows(VersionConflictException.class,
                 () -> withLoggedInUser(() -> service.updateProfile(request(2))));
 
         assertProfileConflict(exception, 2, 4, remote);
         ArgumentCaptor<Wrapper<UserAccount>> reload = wrapperCaptor();
-        verify(userAccountMapper).selectOne(reload.capture());
-        assertTrue(reload.getValue().getSqlSegment().contains("FOR UPDATE"));
+        verify(userAccountMapper, times(2)).selectOne(reload.capture());
+        for (Wrapper<UserAccount> currentRead : reload.getAllValues()) {
+            assertTrue(currentRead.getSqlSegment().contains("FOR UPDATE"));
+        }
     }
 
     @Test
     void disabledAndMissingAccountsKeepExistingAuthorizationBehavior() {
         UserAccount disabled = user(2);
         disabled.setStatus(2);
-        when(userAccountMapper.selectById(7L)).thenReturn(disabled);
+        when(userAccountMapper.selectOne(any())).thenReturn(disabled);
         BusinessException disabledException = assertThrows(BusinessException.class,
                 () -> withLoggedInUser(() -> service.updateProfile(request(2))));
         assertEquals(ErrorCode.FORBIDDEN, disabledException.getErrorCode());
 
-        when(userAccountMapper.selectById(7L)).thenReturn(null);
+        when(userAccountMapper.selectOne(any())).thenReturn(null);
         BusinessException missingException = assertThrows(BusinessException.class,
                 () -> withLoggedInUser(() -> service.updateProfile(request(2))));
         assertEquals(ErrorCode.UNAUTHORIZED, missingException.getErrorCode());
 
-        UserAccount deleted = user(2);
-        deleted.setDeletedAt(java.time.LocalDateTime.now());
-        when(userAccountMapper.selectById(7L)).thenReturn(deleted);
+        when(userAccountMapper.selectOne(any())).thenReturn(null);
         BusinessException deletedException = assertThrows(BusinessException.class,
                 () -> withLoggedInUser(() -> service.updateProfile(request(2))));
         assertEquals(ErrorCode.UNAUTHORIZED, deletedException.getErrorCode());
     }
 
     @Test
-    void unlinkedPersonSelectedBeforeRaceIsGuardedAndNotLogged() {
-        when(userAccountMapper.selectById(7L)).thenReturn(user(2));
+    void conditionalPersonSyncAffectedZeroIsNotLogged() {
+        when(ledgerPersonMapper.selectObjs(any())).thenReturn(List.of(11L));
+        when(ledgerMapper.selectList(any())).thenReturn(List.of(ledger(11L)));
+        when(userAccountMapper.selectOne(any())).thenReturn(user(2));
         when(userAccountMapper.update(isNull(), any())).thenReturn(1);
         when(ledgerPersonMapper.selectList(any())).thenReturn(List.of(person()));
-        // The selected row belonged to this profile, but a concurrent transaction unlinked it before this update.
         when(ledgerPersonMapper.update(isNull(), any())).thenReturn(0);
 
         withLoggedInUser(() -> service.updateProfile(request(2)));
@@ -165,6 +235,27 @@ class AuthServiceConcurrencyTests {
         assertTrue(wrapper.getSqlSegment().contains("deleted_at IS NULL"));
         assertTrue(wrapper.getParamNameValuePairs().containsValue(8L));
         assertTrue(wrapper.getParamNameValuePairs().containsValue(7L));
+        verify(changeLogService, never()).record(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void unlinkCommittedWhileProfileWaitsOnLedgerIsSeenByCurrentPeopleRead() {
+        when(ledgerPersonMapper.selectObjs(any())).thenReturn(List.of(11L));
+        when(ledgerMapper.selectList(any())).thenReturn(List.of(ledger(11L)));
+        when(userAccountMapper.selectOne(any())).thenReturn(user(2));
+        when(userAccountMapper.update(isNull(), any())).thenReturn(1);
+        when(ledgerPersonMapper.selectList(any())).thenReturn(List.of());
+
+        withLoggedInUser(() -> service.updateProfile(request(2)));
+
+        InOrder order = inOrder(ledgerMapper, userAccountMapper, ledgerPersonMapper);
+        order.verify(ledgerMapper).selectList(any());
+        order.verify(userAccountMapper).selectOne(any());
+        order.verify(userAccountMapper).update(isNull(), any());
+        ArgumentCaptor<Wrapper<LedgerPerson>> currentPeople = personWrapperCaptor();
+        order.verify(ledgerPersonMapper).selectList(currentPeople.capture());
+        assertCurrentPeopleLock(currentPeople.getValue());
+        verify(ledgerPersonMapper, never()).update(isNull(), any());
         verify(changeLogService, never()).record(any(), any(), any(), any(), any());
     }
 
@@ -215,12 +306,56 @@ class AuthServiceConcurrencyTests {
         verify(ledgerPersonMapper).update(isNull(), captor.capture());
         LambdaUpdateWrapper<LedgerPerson> wrapper = captor.getValue();
         assertTrue(wrapper.getSqlSegment().contains("id"));
+        assertTrue(wrapper.getSqlSegment().contains("version"));
         assertTrue(wrapper.getSqlSegment().contains("deleted_at IS NULL"));
         assertTrue(wrapper.getSqlSet().contains("name"));
         assertTrue(wrapper.getSqlSet().contains("avatar"));
         assertTrue(wrapper.getSqlSet().contains("updated_at"));
         assertTrue(wrapper.getSqlSet().contains("version = version + 1"));
+        assertTrue(wrapper.getParamNameValuePairs().containsValue(9));
         verify(ledgerPersonMapper, never()).updateById(any(LedgerPerson.class));
+    }
+
+    private void assertDiscoveryRead(Wrapper<LedgerPerson> read) {
+        AbstractWrapper<?, ?, ?> wrapper = (AbstractWrapper<?, ?, ?>) read;
+        String sql = wrapper.getSqlSegment();
+        assertTrue(wrapper.getSqlSelect().contains("DISTINCT ledger_id"));
+        assertTrue(sql.contains("linked_user_id"));
+        assertTrue(sql.contains("deleted_at IS NULL"));
+        assertTrue(sql.contains("ORDER BY ledger_id ASC"));
+        assertFalse(sql.contains("FOR UPDATE"));
+        assertTrue(wrapper.getParamNameValuePairs().containsValue(7L));
+    }
+
+    private void assertLedgerNamespaceLock(Wrapper<Ledger> read, Long... ledgerIds) {
+        AbstractWrapper<?, ?, ?> wrapper = (AbstractWrapper<?, ?, ?>) read;
+        String sql = wrapper.getSqlSegment();
+        assertTrue(sql.contains("id IN"));
+        assertTrue(sql.contains("ORDER BY id ASC"));
+        assertTrue(sql.contains("FOR UPDATE"));
+        assertFalse(sql.contains("deleted_at"));
+        for (Long ledgerId : ledgerIds) {
+            assertTrue(wrapper.getParamNameValuePairs().containsValue(ledgerId));
+        }
+    }
+
+    private void assertCurrentUserLock(Wrapper<UserAccount> read) {
+        AbstractWrapper<?, ?, ?> wrapper = (AbstractWrapper<?, ?, ?>) read;
+        String sql = wrapper.getSqlSegment();
+        assertTrue(sql.contains("id"));
+        assertTrue(sql.contains("deleted_at IS NULL"));
+        assertTrue(sql.contains("FOR UPDATE"));
+        assertTrue(wrapper.getParamNameValuePairs().containsValue(7L));
+    }
+
+    private void assertCurrentPeopleLock(Wrapper<LedgerPerson> read) {
+        AbstractWrapper<?, ?, ?> wrapper = (AbstractWrapper<?, ?, ?>) read;
+        String sql = wrapper.getSqlSegment();
+        assertTrue(sql.contains("linked_user_id"));
+        assertTrue(sql.contains("deleted_at IS NULL"));
+        assertTrue(sql.contains("ORDER BY id ASC"));
+        assertTrue(sql.contains("FOR UPDATE"));
+        assertTrue(wrapper.getParamNameValuePairs().containsValue(7L));
     }
 
     private void assertProfileConflict(VersionConflictException exception, int submittedVersion,
@@ -261,6 +396,16 @@ class AuthServiceConcurrencyTests {
         return (ArgumentCaptor) ArgumentCaptor.forClass(LambdaUpdateWrapper.class);
     }
 
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private ArgumentCaptor<Wrapper<LedgerPerson>> personWrapperCaptor() {
+        return (ArgumentCaptor) ArgumentCaptor.forClass(Wrapper.class);
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private ArgumentCaptor<Wrapper<Ledger>> ledgerWrapperCaptor() {
+        return (ArgumentCaptor) ArgumentCaptor.forClass(Wrapper.class);
+    }
+
     private UserAccount user(int version) {
         UserAccount user = new UserAccount();
         user.setId(7L);
@@ -276,15 +421,26 @@ class AuthServiceConcurrencyTests {
     }
 
     private LedgerPerson person() {
+        return person(8L, "person-uuid", 11L);
+    }
+
+    private LedgerPerson person(Long id, String uuid, Long ledgerId) {
         LedgerPerson person = new LedgerPerson();
-        person.setId(8L);
-        person.setUuid("person-uuid");
-        person.setLedgerId(11L);
+        person.setId(id);
+        person.setUuid(uuid);
+        person.setLedgerId(ledgerId);
         person.setLinkedUserId(7L);
         person.setName("old nickname");
         person.setAvatar("https://example.test/old.png");
         person.setVersion(9);
         return person;
+    }
+
+    private Ledger ledger(Long id) {
+        Ledger ledger = new Ledger();
+        ledger.setId(id);
+        ledger.setUuid("ledger-" + id);
+        return ledger;
     }
 
     private AuthProfileUpdateReq request(int version) {

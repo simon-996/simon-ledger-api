@@ -15,8 +15,10 @@ import com.simon.ledger.dto.resp.AuthLoginResp;
 import com.simon.ledger.dto.resp.AuthUserResp;
 import com.simon.ledger.dto.resp.ConflictResp;
 import com.simon.ledger.dto.resp.ProfileConflictSnapshotResp;
+import com.simon.ledger.entity.Ledger;
 import com.simon.ledger.entity.LedgerPerson;
 import com.simon.ledger.entity.UserAccount;
+import com.simon.ledger.mapper.LedgerMapper;
 import com.simon.ledger.mapper.LedgerPersonMapper;
 import com.simon.ledger.mapper.UserAccountMapper;
 import com.simon.ledger.service.AuthService;
@@ -38,6 +40,7 @@ public class AuthServiceImpl extends ServiceImpl<UserAccountMapper, UserAccount>
     private static final int STATUS_DISABLED = 2;
 
     private final LedgerPersonMapper ledgerPersonMapper;
+    private final LedgerMapper ledgerMapper;
     private final ChangeLogService changeLogService;
 
     @Override
@@ -111,10 +114,9 @@ public class AuthServiceImpl extends ServiceImpl<UserAccountMapper, UserAccount>
     @Transactional(rollbackFor = Exception.class)
     public AuthUserResp updateProfile(AuthProfileUpdateReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
-        UserAccount user = getById(userId);
-        if (user == null || user.getDeletedAt() != null) {
-            throw new BusinessException(ErrorCode.UNAUTHORIZED);
-        }
+        List<Long> linkedLedgerIds = discoverActiveLinkedLedgerIds(userId);
+        lockLedgerNamespaces(linkedLedgerIds);
+        UserAccount user = requireCurrentProfileForUpdate(userId);
         if (STATUS_DISABLED == user.getStatus()) {
             throw new BusinessException(ErrorCode.FORBIDDEN, "账号已禁用");
         }
@@ -136,13 +138,7 @@ public class AuthServiceImpl extends ServiceImpl<UserAccountMapper, UserAccount>
                 .set(UserAccount::getVersion, nextVersion)
                 .set(UserAccount::getUpdatedAt, updatedAt));
         if (affected == 0) {
-            UserAccount current = baseMapper.selectOne(Wrappers.<UserAccount>lambdaQuery()
-                    .eq(UserAccount::getId, userId)
-                    .isNull(UserAccount::getDeletedAt)
-                    .last("FOR UPDATE"));
-            if (current == null) {
-                throw new BusinessException(ErrorCode.UNAUTHORIZED);
-            }
+            UserAccount current = requireCurrentProfileForUpdate(userId);
             throw profileConflict(req.getVersion(), current);
         }
 
@@ -154,15 +150,53 @@ public class AuthServiceImpl extends ServiceImpl<UserAccountMapper, UserAccount>
         return toUserResp(user);
     }
 
+    private List<Long> discoverActiveLinkedLedgerIds(Long userId) {
+        return ledgerPersonMapper.selectObjs(Wrappers.<LedgerPerson>query()
+                        .select("DISTINCT ledger_id")
+                        .eq("linked_user_id", userId)
+                        .isNull("deleted_at")
+                        .orderByAsc("ledger_id"))
+                .stream()
+                .filter(Objects::nonNull)
+                .map(value -> ((Number) value).longValue())
+                .distinct()
+                .sorted()
+                .toList();
+    }
+
+    private void lockLedgerNamespaces(List<Long> ledgerIds) {
+        if (ledgerIds.isEmpty()) {
+            return;
+        }
+        ledgerMapper.selectList(Wrappers.<Ledger>lambdaQuery()
+                .in(Ledger::getId, ledgerIds)
+                .orderByAsc(Ledger::getId)
+                .last("FOR UPDATE"));
+    }
+
+    private UserAccount requireCurrentProfileForUpdate(Long userId) {
+        UserAccount user = baseMapper.selectOne(Wrappers.<UserAccount>lambdaQuery()
+                .eq(UserAccount::getId, userId)
+                .isNull(UserAccount::getDeletedAt)
+                .last("FOR UPDATE"));
+        if (user == null) {
+            throw new BusinessException(ErrorCode.UNAUTHORIZED);
+        }
+        return user;
+    }
+
     private void syncLinkedPeople(Long userId, UserAccount user) {
         List<LedgerPerson> people = ledgerPersonMapper.selectList(Wrappers.<LedgerPerson>lambdaQuery()
                 .eq(LedgerPerson::getLinkedUserId, userId)
-                .isNull(LedgerPerson::getDeletedAt));
+                .isNull(LedgerPerson::getDeletedAt)
+                .orderByAsc(LedgerPerson::getId)
+                .last("FOR UPDATE"));
         LocalDateTime peopleUpdatedAt = LocalDateTime.now();
         for (LedgerPerson person : people) {
             int affected = ledgerPersonMapper.update(null, Wrappers.<LedgerPerson>lambdaUpdate()
                     .eq(LedgerPerson::getId, person.getId())
                     .eq(LedgerPerson::getLinkedUserId, userId)
+                    .eq(LedgerPerson::getVersion, person.getVersion())
                     .isNull(LedgerPerson::getDeletedAt)
                     .set(LedgerPerson::getName, user.getNickname())
                     .set(LedgerPerson::getAvatar, user.getAvatar() == null ? "" : user.getAvatar())
