@@ -33,9 +33,12 @@ import com.simon.ledger.mapper.LedgerTransactionPersonMapper;
 import com.simon.ledger.mapper.UserAccountMapper;
 import com.simon.ledger.service.ChangeLogService;
 import com.simon.ledger.service.TransactionService;
-import lombok.RequiredArgsConstructor;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
@@ -48,12 +51,12 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 @Service
-@RequiredArgsConstructor
 public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper, LedgerTransaction> implements TransactionService {
 
     private static final int MEMBER_STATUS_ACTIVE = 1;
     private static final int TYPE_EXPENSE = 0;
     private static final int TYPE_INCOME = 1;
+    private static final int MAX_CREATE_ATTEMPTS = 3;
 
     private final LedgerMapper ledgerMapper;
     private final LedgerMemberMapper ledgerMemberMapper;
@@ -61,6 +64,26 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
     private final LedgerTransactionPersonMapper ledgerTransactionPersonMapper;
     private final UserAccountMapper userAccountMapper;
     private final ChangeLogService changeLogService;
+    private final TransactionTemplate createTransactions;
+
+    public TransactionServiceImpl(
+            LedgerMapper ledgerMapper,
+            LedgerMemberMapper ledgerMemberMapper,
+            LedgerPersonMapper ledgerPersonMapper,
+            LedgerTransactionPersonMapper ledgerTransactionPersonMapper,
+            UserAccountMapper userAccountMapper,
+            ChangeLogService changeLogService,
+            PlatformTransactionManager transactionManager
+    ) {
+        this.ledgerMapper = ledgerMapper;
+        this.ledgerMemberMapper = ledgerMemberMapper;
+        this.ledgerPersonMapper = ledgerPersonMapper;
+        this.ledgerTransactionPersonMapper = ledgerTransactionPersonMapper;
+        this.userAccountMapper = userAccountMapper;
+        this.changeLogService = changeLogService;
+        this.createTransactions = new TransactionTemplate(transactionManager);
+        this.createTransactions.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+    }
 
     @Override
     public PageResp<TransactionResp> list(String ledgerUuid, TransactionListReq req) {
@@ -103,9 +126,26 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
     }
 
     @Override
-    @Transactional(rollbackFor = Exception.class)
     public TransactionResp create(String ledgerUuid, TransactionCreateReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
+        for (int attempt = 1; attempt <= MAX_CREATE_ATTEMPTS; attempt++) {
+            try {
+                TransactionResp response = createTransactions.execute(
+                        status -> createAttempt(ledgerUuid, req, userId));
+                if (response == null) {
+                    throw new IllegalStateException("流水创建事务未返回结果");
+                }
+                return response;
+            } catch (CreateOperationDuplicateSignal signal) {
+                if (attempt == MAX_CREATE_ATTEMPTS) {
+                    throw new BusinessException(ErrorCode.CONFLICT, "流水创建冲突，请重试");
+                }
+            }
+        }
+        throw new BusinessException(ErrorCode.CONFLICT, "流水创建冲突，请重试");
+    }
+
+    private TransactionResp createAttempt(String ledgerUuid, TransactionCreateReq req, Long userId) {
         Ledger ledger = requireActiveLedgerForMutation(ledgerUuid);
         LedgerMember member = requireActiveMemberForUpdate(ledger.getId(), userId);
         if (!LedgerRoles.canCreateTransaction(member.getRole())) {
@@ -143,7 +183,16 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
         transaction.setClientOperationId(req.getClientOperationId().trim());
         transaction.setVersion(1);
         transaction.setHappenedAt(req.getHappenedAt());
-        save(transaction);
+        try {
+            save(transaction);
+        } catch (DuplicateKeyException duplicate) {
+            LedgerTransaction occupant = findByClientOperationId(
+                    ledger.getId(), userId, transaction.getClientOperationId());
+            if (occupant != null) {
+                throw new CreateOperationDuplicateSignal(duplicate);
+            }
+            throw duplicate;
+        }
 
         replacePeople(transaction.getId(), people);
         changeLogService.record(ledger.getId(), "transaction", transaction.getUuid(), "create", userId);
@@ -269,21 +318,32 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
         String note = normalize(req.getNote());
         LocalDateTime updatedAt = LocalDateTime.now();
         int nextVersion = req.getVersion() + 1;
-        int affected = baseMapper.update(null, Wrappers.<LedgerTransaction>lambdaUpdate()
-                .eq(LedgerTransaction::getId, transaction.getId())
-                .eq(LedgerTransaction::getVersion, req.getVersion())
-                .isNotNull(LedgerTransaction::getDeletedAt)
-                .set(LedgerTransaction::getType, req.getType())
-                .set(LedgerTransaction::getPayerPersonId, payerPersonId)
-                .set(LedgerTransaction::getAmount, req.getAmount())
-                .set(LedgerTransaction::getCurrencyCode, currencyCode)
-                .set(LedgerTransaction::getCategory, category)
-                .set(LedgerTransaction::getNote, note)
-                .set(LedgerTransaction::getHappenedAt, req.getHappenedAt())
-                .set(LedgerTransaction::getLastModifiedByUserId, userId)
-                .set(LedgerTransaction::getDeletedAt, null)
-                .set(LedgerTransaction::getUpdatedAt, updatedAt)
-                .set(LedgerTransaction::getVersion, nextVersion));
+        int affected;
+        try {
+            affected = baseMapper.update(null, Wrappers.<LedgerTransaction>lambdaUpdate()
+                    .eq(LedgerTransaction::getId, transaction.getId())
+                    .eq(LedgerTransaction::getVersion, req.getVersion())
+                    .isNotNull(LedgerTransaction::getDeletedAt)
+                    .set(LedgerTransaction::getType, req.getType())
+                    .set(LedgerTransaction::getPayerPersonId, payerPersonId)
+                    .set(LedgerTransaction::getAmount, req.getAmount())
+                    .set(LedgerTransaction::getCurrencyCode, currencyCode)
+                    .set(LedgerTransaction::getCategory, category)
+                    .set(LedgerTransaction::getNote, note)
+                    .set(LedgerTransaction::getHappenedAt, req.getHappenedAt())
+                    .set(LedgerTransaction::getLastModifiedByUserId, userId)
+                    .set(LedgerTransaction::getDeletedAt, null)
+                    .set(LedgerTransaction::getUpdatedAt, updatedAt)
+                    .set(LedgerTransaction::getVersion, nextVersion));
+        } catch (DuplicateKeyException duplicate) {
+            LedgerTransaction occupant = findByClientOperationId(
+                    ledger.getId(), transaction.getCreatedByUserId(), transaction.getClientOperationId());
+            if (occupant != null && !Objects.equals(occupant.getId(), transaction.getId())) {
+                throw new BusinessException(
+                        ErrorCode.CONFLICT, "clientOperationId 已被其他有效流水使用");
+            }
+            throw duplicate;
+        }
         if (affected == 0) {
             LedgerTransaction latest = reloadTransactionForUpdate(transaction.getId(), transactionUuid);
             requireEditPermission(member, latest, userId);
@@ -768,5 +828,11 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
     }
 
     private record LockedPeople(List<LedgerPerson> people, LedgerPerson payer) {
+    }
+
+    private static final class CreateOperationDuplicateSignal extends RuntimeException {
+        private CreateOperationDuplicateSignal(DuplicateKeyException cause) {
+            super(cause);
+        }
     }
 }

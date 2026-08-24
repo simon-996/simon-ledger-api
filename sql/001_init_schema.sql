@@ -113,7 +113,11 @@ CREATE TABLE IF NOT EXISTS ledger_transaction
     created_at               DATETIME       NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at               DATETIME       NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     deleted_at               DATETIME       NULL,
+    active_operation_slot    TINYINT GENERATED ALWAYS AS
+        (CASE WHEN deleted_at IS NULL THEN 1 ELSE NULL END) STORED,
     UNIQUE KEY uk_ledger_transaction_uuid (uuid),
+    UNIQUE KEY uk_ledger_transaction_active_operation
+        (ledger_id, created_by_user_id, client_operation_id, active_operation_slot),
     KEY idx_ledger_transaction_ledger_happened_at (ledger_id, happened_at),
     KEY idx_ledger_transaction_ledger_type (ledger_id, type),
     KEY idx_ledger_transaction_payer_person_id (payer_person_id),

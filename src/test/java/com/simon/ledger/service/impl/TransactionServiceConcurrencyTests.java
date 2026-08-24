@@ -42,10 +42,15 @@ import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.http.MediaType;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.TransactionStatus;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
@@ -92,6 +97,8 @@ class TransactionServiceConcurrencyTests {
     @Mock private LedgerTransactionPersonMapper relationMapper;
     @Mock private UserAccountMapper userMapper;
     @Mock private ChangeLogService changeLogService;
+    @Mock private PlatformTransactionManager transactionManager;
+    @Mock private TransactionStatus transactionStatus;
 
     private TransactionServiceImpl service;
 
@@ -103,8 +110,11 @@ class TransactionServiceConcurrencyTests {
         initializeLambdaMetadata(LedgerTransaction.class);
         initializeLambdaMetadata(LedgerTransactionPerson.class);
         initializeLambdaMetadata(UserAccount.class);
+        org.mockito.Mockito.lenient().when(transactionManager.getTransaction(any()))
+                .thenReturn(transactionStatus);
         service = new TransactionServiceImpl(
-                ledgerMapper, memberMapper, personMapper, relationMapper, userMapper, changeLogService);
+                ledgerMapper, memberMapper, personMapper, relationMapper, userMapper,
+                changeLogService, transactionManager);
         ReflectionTestUtils.setField(service, "baseMapper", transactionMapper);
     }
 
@@ -230,6 +240,159 @@ class TransactionServiceConcurrencyTests {
         verify(relationMapper, never()).delete(any());
         verify(relationMapper, never()).insert(any(LedgerTransactionPerson.class));
         verify(changeLogService, never()).record(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void createDuplicateRollsBackWholeAttemptThenReplaysExistingInFreshTransaction() {
+        LedgerTransaction existing = transaction(31L, "existing-transaction", 7L, 3, null);
+        existing.setPayerPersonId(42L);
+        when(ledgerMapper.selectOne(any())).thenReturn(ledger());
+        when(memberMapper.selectOne(any())).thenReturn(operator(LedgerRoles.EDITOR));
+        when(transactionMapper.selectOne(any())).thenReturn(null, existing, existing);
+        when(userMapper.selectList(any())).thenReturn(
+                List.of(user(7L, "creator-user", "Creator")),
+                List.of(user(7L, "creator-user", "Creator")));
+        when(personMapper.selectList(any())).thenReturn(
+                List.of(person(41L, "requested-person")),
+                List.of(person(42L, "payer-existing"), person(43L, "existing-person")));
+        when(transactionMapper.insert(any(LedgerTransaction.class)))
+                .thenThrow(new DuplicateKeyException("active operation duplicate"));
+        when(relationMapper.selectList(any())).thenReturn(List.of(relation(31L, 43L)));
+
+        TransactionResp response = loggedIn(() -> service.create(
+                "ledger-uuid", createReq("same-operation", null, List.of("requested-person"))));
+
+        assertEquals("existing-transaction", response.getUuid());
+        assertEquals(List.of("existing-person"), response.getPersonUuids());
+        verify(transactionMapper, times(3)).selectOne(any());
+        verify(transactionMapper, times(1)).insert(any(LedgerTransaction.class));
+        verify(relationMapper, never()).insert(any(LedgerTransactionPerson.class));
+        verify(changeLogService, never()).record(any(), any(), any(), any(), any());
+        verify(transactionManager, times(2)).getTransaction(any());
+        verify(transactionManager).rollback(any());
+        verify(transactionManager).commit(any());
+        InOrder order = inOrder(transactionManager, ledgerMapper, memberMapper, transactionMapper,
+                userMapper, personMapper, relationMapper, changeLogService);
+        order.verify(transactionManager).getTransaction(any());
+        order.verify(ledgerMapper).selectOne(any());
+        order.verify(memberMapper).selectOne(any());
+        order.verify(transactionMapper).selectOne(any());
+        order.verify(userMapper).selectList(any());
+        order.verify(personMapper).selectList(any());
+        order.verify(transactionMapper).insert(any(LedgerTransaction.class));
+        order.verify(transactionMapper).selectOne(any());
+        order.verify(transactionManager).rollback(any());
+        order.verify(transactionManager).getTransaction(any());
+        order.verify(ledgerMapper).selectOne(any());
+        order.verify(memberMapper).selectOne(any());
+        order.verify(transactionMapper).selectOne(any());
+        order.verify(userMapper).selectList(any());
+        order.verify(relationMapper).selectList(any());
+        order.verify(personMapper).selectList(any());
+        order.verify(transactionManager).commit(any());
+    }
+
+    @Test
+    void createDoesNotSwallowUnrelatedDuplicateWhenOperationKeyHasNoOccupant() {
+        when(ledgerMapper.selectOne(any())).thenReturn(ledger());
+        when(memberMapper.selectOne(any())).thenReturn(operator(LedgerRoles.EDITOR));
+        when(transactionMapper.selectOne(any())).thenReturn(null);
+        when(userMapper.selectList(any())).thenReturn(List.of(user(7L, "creator-user", "Creator")));
+        when(personMapper.selectList(any())).thenReturn(List.of(person(41L, "person-a")));
+        DuplicateKeyException duplicate = new DuplicateKeyException("uuid duplicate");
+        when(transactionMapper.insert(any(LedgerTransaction.class))).thenThrow(duplicate);
+
+        DuplicateKeyException thrown = assertThrows(DuplicateKeyException.class,
+                () -> loggedIn(() -> service.create(
+                        "ledger-uuid", createReq("new-operation", null, List.of("person-a")))));
+
+        assertEquals(duplicate, thrown);
+        verify(transactionMapper, times(2)).selectOne(any());
+        verify(transactionManager, times(1)).getTransaction(any());
+        verify(transactionManager).rollback(any());
+        verify(relationMapper, never()).insert(any(LedgerTransactionPerson.class));
+        verify(changeLogService, never()).record(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void repeatedConfirmedCreateDuplicateExhaustionReturnsGenericConflict() {
+        LedgerTransaction occupant = transaction(31L, "occupying-transaction", 7L, 2, null);
+        when(ledgerMapper.selectOne(any())).thenReturn(ledger());
+        when(memberMapper.selectOne(any())).thenReturn(operator(LedgerRoles.EDITOR));
+        when(transactionMapper.selectOne(any())).thenReturn(
+                null, occupant,
+                null, occupant,
+                null, occupant);
+        when(userMapper.selectList(any())).thenReturn(List.of(user(7L, "creator-user", "Creator")));
+        when(personMapper.selectList(any())).thenReturn(List.of(person(41L, "person-a")));
+        when(transactionMapper.insert(any(LedgerTransaction.class)))
+                .thenThrow(new DuplicateKeyException("active operation duplicate"));
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> loggedIn(() -> service.create(
+                        "ledger-uuid", createReq("same-operation", null, List.of("person-a")))));
+
+        assertEquals(ErrorCode.CONFLICT, exception.getErrorCode());
+        assertEquals("流水创建冲突，请重试", exception.getMessage());
+        verify(transactionMapper, times(3)).insert(any(LedgerTransaction.class));
+        verify(transactionManager, times(3)).getTransaction(any());
+        verify(transactionManager, times(3)).rollback(any());
+        verify(transactionManager, never()).commit(any());
+        verify(relationMapper, never()).insert(any(LedgerTransactionPerson.class));
+        verify(changeLogService, never()).record(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void restoreOperationOccupancyReturnsConflictWithoutRelationsLogOrTargetMutation() {
+        LocalDateTime deletedAt = LocalDateTime.of(2026, 8, 20, 13, 0);
+        LedgerTransaction target = transaction(31L, "transaction-uuid", 7L, 4, deletedAt);
+        LedgerTransaction occupant = transaction(32L, "occupying-transaction", 7L, 2, null);
+        stubLedgerAndOperator(LedgerRoles.EDITOR);
+        when(transactionMapper.selectOne(any())).thenReturn(target, occupant);
+        when(userMapper.selectList(any())).thenReturn(List.of(user(7L, "creator-user", "Creator")));
+        when(personMapper.selectList(any())).thenReturn(List.of(person(41L, "person-a")));
+        when(transactionMapper.update(isNull(), any()))
+                .thenThrow(new DuplicateKeyException("active operation duplicate"));
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> loggedIn(() -> invokeRestore(updateReq(4, null, List.of("person-a")))));
+
+        assertEquals(ErrorCode.CONFLICT, exception.getErrorCode());
+        assertEquals("clientOperationId 已被其他有效流水使用", exception.getMessage());
+        assertEquals(deletedAt, target.getDeletedAt());
+        assertEquals(4, target.getVersion());
+        verify(relationMapper, never()).delete(any());
+        verify(relationMapper, never()).insert(any(LedgerTransactionPerson.class));
+        verify(changeLogService, never()).record(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void restoreDoesNotMisclassifyUnrelatedDuplicateWithoutActiveOperationOccupant() {
+        LedgerTransaction target = transaction(31L, "transaction-uuid", 7L, 4, LocalDateTime.now());
+        stubLedgerAndOperator(LedgerRoles.EDITOR);
+        when(transactionMapper.selectOne(any())).thenReturn(target).thenReturn(null);
+        when(userMapper.selectList(any())).thenReturn(List.of(user(7L, "creator-user", "Creator")));
+        when(personMapper.selectList(any())).thenReturn(List.of(person(41L, "person-a")));
+        DuplicateKeyException duplicate = new DuplicateKeyException("another constraint");
+        when(transactionMapper.update(isNull(), any())).thenThrow(duplicate);
+
+        DuplicateKeyException thrown = assertThrows(DuplicateKeyException.class,
+                () -> loggedIn(() -> invokeRestore(updateReq(4, null, List.of("person-a")))));
+
+        assertEquals(duplicate, thrown);
+        verify(relationMapper, never()).delete(any());
+        verify(changeLogService, never()).record(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void createUsesIndependentRequiresNewTransactionsForRetryAttempts() throws Exception {
+        Method create = TransactionServiceImpl.class.getMethod(
+                "create", String.class, TransactionCreateReq.class);
+        assertNull(create.getAnnotation(Transactional.class));
+        TransactionTemplate template = (TransactionTemplate) ReflectionTestUtils.getField(
+                service, "createTransactions");
+        assertNotNull(template);
+        assertEquals(TransactionDefinition.PROPAGATION_REQUIRES_NEW, template.getPropagationBehavior());
     }
 
     @Test

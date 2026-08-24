@@ -46,6 +46,7 @@ sql/
   002_add_transaction_payer.sql
   003_add_admin_console.sql
   004_add_optimistic_versions.sql
+  005_add_transaction_operation_uniqueness.sql
 ```
 
 ## 主要接口
@@ -159,7 +160,7 @@ simon-ledger: <token>
 src/main/resources/application-prod.yml.example
 ```
 
-全新数据库直接执行当前 `001_init_schema.sql`，其中已经包含流水付款人字段和五类实体的 `version` 字段；随后按需执行 `003_add_admin_console.sql`。不要再对这类全新结构执行 `002` 或 `004`，否则会重复添加已有字段。
+全新数据库直接执行当前 `001_init_schema.sql`（Fresh 001），其中已经包含流水付款人字段、五类实体的 `version` 字段和流水 `clientOperationId` 的 active-only 唯一键；随后按需执行 `003_add_admin_console.sql`。不要再对这类全新结构执行 `002`、`004` 或 `005`，否则会重复添加已有字段或索引。
 
 历史数据库只执行尚未应用的增量脚本，并严格按编号顺序升级：
 
@@ -167,9 +168,25 @@ src/main/resources/application-prod.yml.example
 sql/002_add_transaction_payer.sql
 sql/003_add_admin_console.sql
 sql/004_add_optimistic_versions.sql
+sql/005_add_transaction_operation_uniqueness.sql
 ```
 
 `004_add_optimistic_versions.sql` 必须在可丢弃的 MySQL 8 数据库同时验证全新初始化和历史结构升级路径后再部署；升级完成后，`user_account`、`ledger`、`ledger_member`、`ledger_person`、`ledger_transaction` 的 `version` 都应为 `INT NOT NULL DEFAULT 1`。
+
+`005_add_transaction_operation_uniqueness.sql` 是一次性执行的历史库增量。在执行前，先运行下面的只读 preflight SQL，查找仍有效流水中重复的 `clientOperationId`：
+
+```sql
+SELECT ledger_id, created_by_user_id, client_operation_id, COUNT(*) AS duplicate_count
+FROM ledger_transaction
+WHERE deleted_at IS NULL
+  AND client_operation_id IS NOT NULL
+GROUP BY ledger_id, created_by_user_id, client_operation_id
+HAVING COUNT(*) > 1;
+```
+
+如果查询返回记录，必须先人工核对并逐项处理，再执行 `005`；升级脚本不自动删除、修改或合并任何账目。该唯一键使用生成列令有效流水的 slot 为 `1`、已删除流水的 slot 为 `NULL`：同一账本、同一创建人、同一非空 operation id 只能有一条有效流水；历史删除记录可以保留多条，legacy 的 `client_operation_id = NULL` 记录也不会互相冲突。
+
+当前环境没有可丢弃的真实 MySQL 8 实例，因此 `005` 的 disposable MySQL 8 语法与升级实库验证尚未完成；部署前仍需完成该验证，不能用静态契约测试替代。
 
 `003_add_admin_console.sql` 会创建 `admin_user` 和 `admin_operation_log`。首个后台管理员不会自动创建，需要先生成 BCrypt 密码 hash，再手动插入 `admin_user`。
 
