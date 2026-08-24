@@ -158,11 +158,14 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
         LedgerTransaction transaction = requireTransactionForMutation(ledger.getId(), transactionUuid);
         requireEditPermission(member, transaction, userId);
         if (transaction.getDeletedAt() != null || !Objects.equals(transaction.getVersion(), req.getVersion())) {
-            throw transactionConflict(ledger, transaction, req.getVersion());
+            throw transactionConflict(ledger, transaction, req.getVersion(), null);
         }
         validateType(req.getType());
-        List<LedgerPerson> people = requirePeopleForUpdate(ledger.getId(), req.getPersonUuids());
-        LedgerPerson payer = resolvePayerForUpdate(ledger.getId(), req.getType(), req.getPayerPersonUuid());
+        Map<Long, UserAccount> lockedUsers = lockMutationUsers(transaction, userId);
+        LockedPeople lockedPeople = lockRequestedPeople(
+                ledger.getId(), req.getType(), req.getPayerPersonUuid(), req.getPersonUuids());
+        List<LedgerPerson> people = lockedPeople.people();
+        LedgerPerson payer = lockedPeople.payer();
 
         Long payerPersonId = payer == null ? null : payer.getId();
         String currencyCode = req.getCurrencyCode().trim().toUpperCase();
@@ -188,13 +191,13 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
         if (affected == 0) {
             LedgerTransaction latest = reloadTransactionForUpdate(transaction.getId(), transactionUuid);
             requireEditPermission(member, latest, userId);
-            throw transactionConflict(ledger, latest, req.getVersion());
+            throw transactionConflict(ledger, latest, req.getVersion(), lockedUsers);
         }
         applyUpdate(transaction, req, payerPersonId, userId, currencyCode, category, note, updatedAt, nextVersion);
 
         replacePeople(transaction.getId(), people);
         changeLogService.record(ledger.getId(), "transaction", transaction.getUuid(), "update", userId);
-        return toCurrentResp(ledger, transaction, people);
+        return toResp(ledger, transaction, people, lockedUsers, payerPersonUuidMap(payer));
     }
 
     @Override
@@ -206,7 +209,7 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
         LedgerTransaction transaction = requireTransactionForMutation(ledger.getId(), transactionUuid);
         requireEditPermission(member, transaction, userId);
         if (transaction.getDeletedAt() != null || !Objects.equals(transaction.getVersion(), req.getVersion())) {
-            throw transactionConflict(ledger, transaction, req.getVersion());
+            throw transactionConflict(ledger, transaction, req.getVersion(), null);
         }
 
         LocalDateTime updatedAt = LocalDateTime.now();
@@ -222,7 +225,7 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
         if (affected == 0) {
             LedgerTransaction latest = reloadTransactionForUpdate(transaction.getId(), transactionUuid);
             requireEditPermission(member, latest, userId);
-            throw transactionConflict(ledger, latest, req.getVersion());
+            throw transactionConflict(ledger, latest, req.getVersion(), null);
         }
         transaction.setDeletedAt(updatedAt);
         transaction.setLastModifiedByUserId(userId);
@@ -241,11 +244,14 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
         LedgerTransaction transaction = requireTransactionForMutation(ledger.getId(), transactionUuid);
         requireEditPermission(member, transaction, userId);
         if (transaction.getDeletedAt() == null || !Objects.equals(transaction.getVersion(), req.getVersion())) {
-            throw transactionConflict(ledger, transaction, req.getVersion());
+            throw transactionConflict(ledger, transaction, req.getVersion(), null);
         }
         validateType(req.getType());
-        List<LedgerPerson> people = requirePeopleForUpdate(ledger.getId(), req.getPersonUuids());
-        LedgerPerson payer = resolvePayerForUpdate(ledger.getId(), req.getType(), req.getPayerPersonUuid());
+        Map<Long, UserAccount> lockedUsers = lockMutationUsers(transaction, userId);
+        LockedPeople lockedPeople = lockRequestedPeople(
+                ledger.getId(), req.getType(), req.getPayerPersonUuid(), req.getPersonUuids());
+        List<LedgerPerson> people = lockedPeople.people();
+        LedgerPerson payer = lockedPeople.payer();
 
         Long payerPersonId = payer == null ? null : payer.getId();
         String currencyCode = req.getCurrencyCode().trim().toUpperCase();
@@ -271,13 +277,13 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
         if (affected == 0) {
             LedgerTransaction latest = reloadTransactionForUpdate(transaction.getId(), transactionUuid);
             requireEditPermission(member, latest, userId);
-            throw transactionConflict(ledger, latest, req.getVersion());
+            throw transactionConflict(ledger, latest, req.getVersion(), lockedUsers);
         }
         applyUpdate(transaction, req, payerPersonId, userId, currencyCode, category, note, updatedAt, nextVersion);
         transaction.setDeletedAt(null);
         replacePeople(transaction.getId(), people);
         changeLogService.record(ledger.getId(), "transaction", transaction.getUuid(), "update", userId);
-        return toCurrentResp(ledger, transaction, people);
+        return toResp(ledger, transaction, people, lockedUsers, payerPersonUuidMap(payer));
     }
 
     private LedgerTransaction findByClientOperationId(Long ledgerId, Long userId, String clientOperationId) {
@@ -393,20 +399,44 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
         return people;
     }
 
-    private List<LedgerPerson> requirePeopleForUpdate(Long ledgerId, List<String> personUuids) {
-        List<String> uuids = normalizedPersonUuids(personUuids);
-        if (uuids.isEmpty()) {
+    private LockedPeople lockRequestedPeople(
+            Long ledgerId,
+            Integer type,
+            String payerPersonUuid,
+            List<String> personUuids
+    ) {
+        List<String> participantUuids = normalizedPersonUuids(personUuids);
+        if (participantUuids.isEmpty()) {
             throw new BusinessException(ErrorCode.BAD_REQUEST, "参与人不能为空");
         }
-        List<LedgerPerson> people = ledgerPersonMapper.selectList(Wrappers.<LedgerPerson>lambdaQuery()
+        String normalizedPayerUuid = Objects.equals(TYPE_EXPENSE, type) && StringUtils.hasText(payerPersonUuid)
+                ? payerPersonUuid.trim()
+                : null;
+        List<String> lockedUuids = Stream.concat(
+                        participantUuids.stream(),
+                        normalizedPayerUuid == null ? Stream.empty() : Stream.of(normalizedPayerUuid))
+                .distinct()
+                .toList();
+        List<LedgerPerson> lockedPeople = ledgerPersonMapper.selectList(Wrappers.<LedgerPerson>lambdaQuery()
                 .eq(LedgerPerson::getLedgerId, ledgerId)
-                .in(LedgerPerson::getUuid, uuids)
+                .in(LedgerPerson::getUuid, lockedUuids)
                 .isNull(LedgerPerson::getDeletedAt)
+                .orderByAsc(LedgerPerson::getId)
                 .last("FOR UPDATE"));
-        if (people.size() != uuids.size()) {
+        Map<String, LedgerPerson> peopleByUuid = lockedPeople.stream()
+                .collect(Collectors.toMap(LedgerPerson::getUuid, Function.identity(), (a, b) -> a));
+        List<LedgerPerson> participants = participantUuids.stream()
+                .map(peopleByUuid::get)
+                .filter(Objects::nonNull)
+                .toList();
+        if (participants.size() != participantUuids.size()) {
             throw new BusinessException(ErrorCode.BAD_REQUEST, "参与人不存在或已删除");
         }
-        return people;
+        LedgerPerson payer = normalizedPayerUuid == null ? null : peopleByUuid.get(normalizedPayerUuid);
+        if (normalizedPayerUuid != null && payer == null) {
+            throw new BusinessException(ErrorCode.NOT_FOUND, "参与人不存在");
+        }
+        return new LockedPeople(participants, payer);
     }
 
     private List<String> normalizedPersonUuids(List<String> personUuids) {
@@ -422,21 +452,6 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
             return null;
         }
         return requirePerson(ledgerId, payerPersonUuid.trim(), false);
-    }
-
-    private LedgerPerson resolvePayerForUpdate(Long ledgerId, Integer type, String payerPersonUuid) {
-        if (!Objects.equals(TYPE_EXPENSE, type) || !StringUtils.hasText(payerPersonUuid)) {
-            return null;
-        }
-        LedgerPerson payer = ledgerPersonMapper.selectOne(Wrappers.<LedgerPerson>lambdaQuery()
-                .eq(LedgerPerson::getLedgerId, ledgerId)
-                .eq(LedgerPerson::getUuid, payerPersonUuid.trim())
-                .isNull(LedgerPerson::getDeletedAt)
-                .last("FOR UPDATE"));
-        if (payer == null) {
-            throw new BusinessException(ErrorCode.NOT_FOUND, "参与人不存在");
-        }
-        return payer;
     }
 
     private void replacePeople(Long transactionId, List<LedgerPerson> people) {
@@ -469,20 +484,35 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
         return ledgerPersonMapper.selectList(wrapper);
     }
 
-    private List<LedgerPerson> currentPeopleByTransactionId(Long transactionId) {
-        List<Long> personIds = ledgerTransactionPersonMapper.selectList(
-                        Wrappers.<LedgerTransactionPerson>lambdaQuery()
-                                .eq(LedgerTransactionPerson::getTransactionId, transactionId)
-                                .last("FOR UPDATE"))
-                .stream()
-                .map(LedgerTransactionPerson::getPersonId)
+    private LockedPeople lockCurrentTransactionPeople(LedgerTransaction transaction) {
+        List<LedgerTransactionPerson> relations = ledgerTransactionPersonMapper.selectList(
+                Wrappers.<LedgerTransactionPerson>lambdaQuery()
+                        .eq(LedgerTransactionPerson::getTransactionId, transaction.getId())
+                        .orderByAsc(LedgerTransactionPerson::getId)
+                        .last("FOR UPDATE"));
+        List<Long> personIds = Stream.concat(
+                        relations.stream().map(LedgerTransactionPerson::getPersonId),
+                        transaction.getPayerPersonId() == null
+                                ? Stream.empty()
+                                : Stream.of(transaction.getPayerPersonId()))
+                .distinct()
+                .sorted()
                 .toList();
         if (personIds.isEmpty()) {
-            return List.of();
+            return new LockedPeople(List.of(), null);
         }
-        return ledgerPersonMapper.selectList(Wrappers.<LedgerPerson>lambdaQuery()
-                .in(LedgerPerson::getId, personIds)
-                .last("FOR UPDATE"));
+        Map<Long, LedgerPerson> peopleById = ledgerPersonMapper.selectList(
+                        Wrappers.<LedgerPerson>lambdaQuery()
+                                .in(LedgerPerson::getId, personIds)
+                                .orderByAsc(LedgerPerson::getId)
+                                .last("FOR UPDATE"))
+                .stream()
+                .collect(Collectors.toMap(LedgerPerson::getId, Function.identity(), (a, b) -> a));
+        List<LedgerPerson> people = relations.stream()
+                .map(relation -> peopleById.get(relation.getPersonId()))
+                .filter(Objects::nonNull)
+                .toList();
+        return new LockedPeople(people, peopleById.get(transaction.getPayerPersonId()));
     }
 
     private Map<Long, List<LedgerPerson>> peopleMapByTransactionIds(List<Long> transactionIds) {
@@ -562,15 +592,6 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
         return resp;
     }
 
-    private TransactionResp toCurrentResp(
-            Ledger ledger,
-            LedgerTransaction transaction,
-            List<LedgerPerson> people
-    ) {
-        return toResp(ledger, transaction, people,
-                currentUserMap(List.of(transaction)), currentPayerPersonUuidMap(List.of(transaction)));
-    }
-
     private Map<Long, UserAccount> userMap(List<LedgerTransaction> transactions) {
         List<Long> userIds = transactions.stream()
                 .flatMap(transaction -> Stream.of(transaction.getCreatedByUserId(), transaction.getLastModifiedByUserId()))
@@ -585,18 +606,28 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
                 .collect(Collectors.toMap(UserAccount::getId, Function.identity(), (a, b) -> a));
     }
 
-    private Map<Long, UserAccount> currentUserMap(List<LedgerTransaction> transactions) {
-        List<Long> userIds = transactions.stream()
-                .flatMap(transaction -> Stream.of(
-                        transaction.getCreatedByUserId(), transaction.getLastModifiedByUserId()))
+    private Map<Long, UserAccount> lockMutationUsers(LedgerTransaction transaction, Long userId) {
+        return lockUsers(Stream.of(
+                transaction.getCreatedByUserId(), transaction.getLastModifiedByUserId(), userId));
+    }
+
+    private Map<Long, UserAccount> lockResponseUsers(LedgerTransaction transaction) {
+        return lockUsers(Stream.of(
+                transaction.getCreatedByUserId(), transaction.getLastModifiedByUserId()));
+    }
+
+    private Map<Long, UserAccount> lockUsers(Stream<Long> requestedUserIds) {
+        List<Long> userIds = requestedUserIds
                 .filter(Objects::nonNull)
                 .distinct()
+                .sorted()
                 .toList();
         if (userIds.isEmpty()) {
             return Map.of();
         }
         return userAccountMapper.selectList(Wrappers.<UserAccount>lambdaQuery()
                         .in(UserAccount::getId, userIds)
+                        .orderByAsc(UserAccount::getId)
                         .last("FOR UPDATE"))
                 .stream()
                 .collect(Collectors.toMap(UserAccount::getId, Function.identity(), (a, b) -> a));
@@ -631,20 +662,11 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
                 .collect(Collectors.toMap(LedgerPerson::getId, LedgerPerson::getUuid, (a, b) -> a));
     }
 
-    private Map<Long, String> currentPayerPersonUuidMap(List<LedgerTransaction> transactions) {
-        List<Long> payerPersonIds = transactions.stream()
-                .map(LedgerTransaction::getPayerPersonId)
-                .filter(Objects::nonNull)
-                .distinct()
-                .toList();
-        if (payerPersonIds.isEmpty()) {
+    private Map<Long, String> payerPersonUuidMap(LedgerPerson payer) {
+        if (payer == null) {
             return Map.of();
         }
-        return ledgerPersonMapper.selectList(Wrappers.<LedgerPerson>lambdaQuery()
-                        .in(LedgerPerson::getId, payerPersonIds)
-                        .last("FOR UPDATE"))
-                .stream()
-                .collect(Collectors.toMap(LedgerPerson::getId, LedgerPerson::getUuid, (a, b) -> a));
+        return Map.of(payer.getId(), payer.getUuid());
     }
 
     private String payerPersonUuid(LedgerTransaction transaction, Map<Long, String> payerPersonUuidMap) {
@@ -691,10 +713,19 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
     private VersionConflictException transactionConflict(
             Ledger ledger,
             LedgerTransaction transaction,
-            Integer submittedVersion
+            Integer submittedVersion,
+            Map<Long, UserAccount> prelockedUsers
     ) {
-        TransactionResp snapshot = toCurrentResp(
-                ledger, transaction, currentPeopleByTransactionId(transaction.getId()));
+        Map<Long, UserAccount> lockedUsers = prelockedUsers == null
+                ? lockResponseUsers(transaction)
+                : prelockedUsers;
+        LockedPeople lockedPeople = lockCurrentTransactionPeople(transaction);
+        TransactionResp snapshot = toResp(
+                ledger,
+                transaction,
+                lockedPeople.people(),
+                lockedUsers,
+                payerPersonUuidMap(lockedPeople.payer()));
         return new VersionConflictException(new ConflictResp(
                 "transaction",
                 transaction.getUuid(),
@@ -739,5 +770,8 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
             return null;
         }
         return value.trim();
+    }
+
+    private record LockedPeople(List<LedgerPerson> people, LedgerPerson payer) {
     }
 }

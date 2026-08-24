@@ -166,9 +166,19 @@ class TransactionServiceConcurrencyTests {
         LedgerPerson payer = person(42L, "payer-person");
         stubLedgerAndOperator(LedgerRoles.OWNER);
         when(transactionMapper.selectOne(any())).thenReturn(target);
-        when(personMapper.selectList(any())).thenReturn(
-                List.of(person(41L, "person-a")), List.of(payer));
-        when(personMapper.selectOne(any())).thenReturn(payer);
+        when(userMapper.selectList(any())).thenReturn(List.of(
+                user(7L, "modifier-user", "Modifier"), user(8L, "creator-user", "Creator")));
+        when(personMapper.selectList(any())).thenAnswer(invocation -> {
+            AbstractWrapper<?, ?, ?> wrapper = (AbstractWrapper<?, ?, ?>) invocation.getArgument(0);
+            wrapper.getSqlSegment();
+            if (wrapper.getParamNameValuePairs().size() >= 3) {
+                return List.of(person(41L, "person-a"), payer);
+            }
+            if (wrapper.getParamNameValuePairs().containsValue(42L)) {
+                return List.of(payer);
+            }
+            return List.of(person(41L, "person-a"));
+        });
         when(transactionMapper.update(isNull(), any())).thenReturn(1);
         TransactionUpdateReq req = updateReq(4, "payer-person", List.of("person-a"));
         req.setType(0);
@@ -177,13 +187,20 @@ class TransactionServiceConcurrencyTests {
                 "ledger-uuid", "transaction-uuid", req));
 
         assertEquals("payer-person", response.getPayerPersonUuid());
-        ArgumentCaptor<Wrapper<LedgerPerson>> payerRead = personWrapperCaptor();
-        verify(personMapper).selectOne(payerRead.capture());
-        assertTrue(payerRead.getValue().getSqlSegment().contains("FOR UPDATE"));
-        ArgumentCaptor<Wrapper<LedgerPerson>> reads = personWrapperCaptor();
-        verify(personMapper, times(2)).selectList(reads.capture());
-        assertTrue(reads.getAllValues().get(0).getSqlSegment().contains("FOR UPDATE"));
-        assertTrue(reads.getAllValues().get(1).getSqlSegment().contains("FOR UPDATE"));
+        verify(personMapper, never()).selectOne(any());
+        ArgumentCaptor<Wrapper<LedgerPerson>> peopleRead = personWrapperCaptor();
+        verify(personMapper, times(1)).selectList(peopleRead.capture());
+        AbstractWrapper<?, ?, ?> peopleWrapper = (AbstractWrapper<?, ?, ?>) peopleRead.getValue();
+        assertOrderedForUpdate(peopleWrapper);
+        assertTrue(peopleWrapper.getParamNameValuePairs().containsValue("person-a"));
+        assertTrue(peopleWrapper.getParamNameValuePairs().containsValue("payer-person"));
+        ArgumentCaptor<Wrapper<UserAccount>> usersRead = userWrapperCaptor();
+        verify(userMapper, times(1)).selectList(usersRead.capture());
+        assertOrderedForUpdate((AbstractWrapper<?, ?, ?>) usersRead.getValue());
+        InOrder lockOrder = inOrder(userMapper, personMapper, transactionMapper);
+        lockOrder.verify(userMapper).selectList(any());
+        lockOrder.verify(personMapper).selectList(any());
+        lockOrder.verify(transactionMapper).update(isNull(), any());
     }
 
     @Test
@@ -281,6 +298,10 @@ class TransactionServiceConcurrencyTests {
         verify(transactionMapper, never()).update(isNull(), any());
         verify(changeLogService, never()).record(any(), any(), any(), any(), any());
         assertCurrentSnapshotReadsLocked();
+        InOrder lockOrder = inOrder(userMapper, relationMapper, personMapper);
+        lockOrder.verify(userMapper).selectList(any());
+        lockOrder.verify(relationMapper).selectList(any());
+        lockOrder.verify(personMapper).selectList(any());
     }
 
     @Test
@@ -357,8 +378,7 @@ class TransactionServiceConcurrencyTests {
         when(transactionMapper.selectOne(any())).thenReturn(initial, latest);
         when(personMapper.selectList(any())).thenReturn(
                 List.of(person(41L, "person-a")),
-                List.of(person(43L, "person-latest")),
-                List.of(person(42L, "payer-latest")));
+                List.of(person(42L, "payer-latest"), person(43L, "person-latest")));
         when(transactionMapper.update(isNull(), any())).thenReturn(0);
         when(relationMapper.selectList(any())).thenReturn(List.of(relation(31L, 43L)));
         when(userMapper.selectList(any())).thenReturn(List.of(
@@ -379,6 +399,12 @@ class TransactionServiceConcurrencyTests {
         verify(relationMapper, never()).insert(any(LedgerTransactionPerson.class));
         verify(changeLogService, never()).record(any(), any(), any(), any(), any());
         assertCurrentSnapshotReadsLocked();
+        InOrder lockOrder = inOrder(userMapper, personMapper, transactionMapper, relationMapper);
+        lockOrder.verify(userMapper).selectList(any());
+        lockOrder.verify(personMapper).selectList(any());
+        lockOrder.verify(transactionMapper).update(isNull(), any());
+        lockOrder.verify(relationMapper).selectList(any());
+        lockOrder.verify(personMapper).selectList(any());
     }
 
     @Test
@@ -541,7 +567,7 @@ class TransactionServiceConcurrencyTests {
     private void stubCurrentSnapshotRelationsAndUsers() {
         when(relationMapper.selectList(any())).thenReturn(List.of(relation(31L, 43L)));
         when(personMapper.selectList(any())).thenReturn(
-                List.of(person(43L, "person-latest")), List.of(person(42L, "payer-latest")));
+                List.of(person(42L, "payer-latest"), person(43L, "person-latest")));
         when(userMapper.selectList(any())).thenReturn(List.of(
                 user(8L, "creator-user", "Creator"), user(9L, "modifier-user", "Modifier")));
     }
@@ -569,15 +595,20 @@ class TransactionServiceConcurrencyTests {
     private void assertCurrentSnapshotReadsLocked() {
         ArgumentCaptor<Wrapper<LedgerTransactionPerson>> relationRead = relationWrapperCaptor();
         verify(relationMapper).selectList(relationRead.capture());
-        assertTrue(relationRead.getValue().getSqlSegment().contains("FOR UPDATE"));
+        assertOrderedForUpdate((AbstractWrapper<?, ?, ?>) relationRead.getValue());
         ArgumentCaptor<Wrapper<LedgerPerson>> personReads = personWrapperCaptor();
-        verify(personMapper, atLeast(2)).selectList(personReads.capture());
+        verify(personMapper, atLeast(1)).selectList(personReads.capture());
         List<Wrapper<LedgerPerson>> reads = personReads.getAllValues();
-        assertTrue(reads.get(reads.size() - 2).getSqlSegment().contains("FOR UPDATE"));
-        assertTrue(reads.get(reads.size() - 1).getSqlSegment().contains("FOR UPDATE"));
+        assertOrderedForUpdate((AbstractWrapper<?, ?, ?>) reads.get(reads.size() - 1));
         ArgumentCaptor<Wrapper<UserAccount>> userRead = userWrapperCaptor();
-        verify(userMapper).selectList(userRead.capture());
-        assertTrue(userRead.getValue().getSqlSegment().contains("FOR UPDATE"));
+        verify(userMapper, times(1)).selectList(userRead.capture());
+        assertOrderedForUpdate((AbstractWrapper<?, ?, ?>) userRead.getValue());
+    }
+
+    private void assertOrderedForUpdate(AbstractWrapper<?, ?, ?> wrapper) {
+        String sql = wrapper.getSqlSegment();
+        assertTrue(sql.matches("(?s).*ORDER BY\\s+id\\s+ASC.*"), () -> "missing stable id order in " + sql);
+        assertTrue(sql.contains("FOR UPDATE"), () -> "missing current-read lock in " + sql);
     }
 
     private void assertAtomicWrapper(LambdaUpdateWrapper<?> wrapper, String deletedPredicate,
