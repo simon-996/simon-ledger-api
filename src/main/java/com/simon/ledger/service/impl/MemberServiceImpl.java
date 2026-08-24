@@ -66,12 +66,12 @@ public class MemberServiceImpl extends ServiceImpl<LedgerMemberMapper, LedgerMem
         if (!LedgerRoles.isValidJoinableRole(newRole)) {
             throw new BusinessException(ErrorCode.BAD_REQUEST, "角色不正确");
         }
+        requireAssignRolePermission(operator.getRole(), target.getRole(), newRole);
         if (target.getDeletedAt() != null
                 || !Integer.valueOf(MEMBER_STATUS_ACTIVE).equals(target.getStatus())
                 || !target.getVersion().equals(req.getVersion())) {
             throw memberConflict(target, req.getVersion());
         }
-        requireAssignRolePermission(operator.getRole(), target.getRole(), newRole);
 
         LocalDateTime updatedAt = LocalDateTime.now();
         int nextVersion = req.getVersion() + 1;
@@ -84,7 +84,9 @@ public class MemberServiceImpl extends ServiceImpl<LedgerMemberMapper, LedgerMem
                 .set(LedgerMember::getVersion, nextVersion)
                 .set(LedgerMember::getUpdatedAt, updatedAt));
         if (affected == 0) {
-            throw memberConflict(reloadMemberForUpdate(target.getId(), memberUuid), req.getVersion());
+            LedgerMember latest = reloadMemberForUpdate(target.getId(), memberUuid);
+            requireAssignRolePermission(operator.getRole(), latest.getRole(), newRole);
+            throw memberConflict(latest, req.getVersion());
         }
         target.setRole(newRole);
         target.setVersion(nextVersion);
@@ -101,12 +103,12 @@ public class MemberServiceImpl extends ServiceImpl<LedgerMemberMapper, LedgerMem
         LedgerMember operator = requireActiveMember(ledger.getId(), userId);
         requireManageMemberPermission(operator);
         LedgerMember target = requireMemberForMutation(ledger.getId(), memberUuid);
+        requireRemoveRolePermission(operator.getRole(), target.getRole());
         if (target.getDeletedAt() != null
                 || !Integer.valueOf(MEMBER_STATUS_ACTIVE).equals(target.getStatus())
                 || !target.getVersion().equals(req.getVersion())) {
             throw memberConflict(target, req.getVersion());
         }
-        requireRemoveRolePermission(operator.getRole(), target.getRole());
 
         LocalDateTime updatedAt = LocalDateTime.now();
         int nextVersion = req.getVersion() + 1;
@@ -119,7 +121,9 @@ public class MemberServiceImpl extends ServiceImpl<LedgerMemberMapper, LedgerMem
                 .set(LedgerMember::getUpdatedAt, updatedAt)
                 .set(LedgerMember::getVersion, nextVersion));
         if (affected == 0) {
-            throw memberConflict(reloadMemberForUpdate(target.getId(), memberUuid), req.getVersion());
+            LedgerMember latest = reloadMemberForUpdate(target.getId(), memberUuid);
+            requireRemoveRolePermission(operator.getRole(), latest.getRole());
+            throw memberConflict(latest, req.getVersion());
         }
         target.setDeletedAt(updatedAt);
         target.setUpdatedAt(updatedAt);
@@ -140,12 +144,12 @@ public class MemberServiceImpl extends ServiceImpl<LedgerMemberMapper, LedgerMem
         if (!LedgerRoles.isValidJoinableRole(newRole)) {
             throw new BusinessException(ErrorCode.BAD_REQUEST, "角色不正确");
         }
+        requireAssignRolePermission(operator.getRole(), target.getRole(), newRole);
         if (target.getDeletedAt() == null
                 || !Integer.valueOf(MEMBER_STATUS_ACTIVE).equals(target.getStatus())
                 || !target.getVersion().equals(req.getVersion())) {
             throw memberConflict(target, req.getVersion());
         }
-        requireAssignRolePermission(operator.getRole(), target.getRole(), newRole);
 
         LocalDateTime updatedAt = LocalDateTime.now();
         int nextVersion = req.getVersion() + 1;
@@ -159,7 +163,9 @@ public class MemberServiceImpl extends ServiceImpl<LedgerMemberMapper, LedgerMem
                 .set(LedgerMember::getUpdatedAt, updatedAt)
                 .set(LedgerMember::getVersion, nextVersion));
         if (affected == 0) {
-            throw memberConflict(reloadMemberForUpdate(target.getId(), memberUuid), req.getVersion());
+            LedgerMember latest = reloadMemberForUpdate(target.getId(), memberUuid);
+            requireAssignRolePermission(operator.getRole(), latest.getRole(), newRole);
+            throw memberConflict(latest, req.getVersion());
         }
         target.setRole(newRole);
         target.setDeletedAt(null);

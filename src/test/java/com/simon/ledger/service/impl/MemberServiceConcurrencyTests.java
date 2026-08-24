@@ -48,6 +48,7 @@ import java.util.function.Supplier;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -150,6 +151,97 @@ class MemberServiceConcurrencyTests {
     }
 
     @Test
+    void affectedZeroReloadsLatestMemberForRemoveAndDoesNotLog() {
+        LedgerMember owner = member(21L, "owner-member", 7L, LedgerRoles.OWNER, 3, null);
+        LedgerMember initial = member(22L, "member-uuid", 8L, LedgerRoles.EDITOR, 4, null);
+        LedgerMember latest = member(22L, "member-uuid", 8L, LedgerRoles.VIEWER, 8, LocalDateTime.now());
+        when(ledgerMapper.selectOne(any())).thenReturn(ledger());
+        when(memberMapper.selectOne(any())).thenReturn(owner, initial, latest);
+        when(memberMapper.update(isNull(), any())).thenReturn(0);
+        when(userMapper.selectById(8L)).thenReturn(user(8L));
+
+        VersionConflictException exception = assertThrows(VersionConflictException.class,
+                () -> loggedIn(() -> invokeRemove("ledger-uuid", "member-uuid", deleteReq(4))));
+
+        assertMemberConflict(exception, 4, 8, true, LedgerRoles.VIEWER);
+        ArgumentCaptor<Wrapper<LedgerMember>> reload = memberWrapperCaptor();
+        verify(memberMapper, times(3)).selectOne(reload.capture());
+        assertTrue(reload.getAllValues().get(2).getSqlSegment().contains("FOR UPDATE"));
+        verify(changeLogService, never()).record(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void affectedZeroReloadsLatestMemberForRestoreAndDoesNotLog() {
+        LedgerMember owner = member(21L, "owner-member", 7L, LedgerRoles.OWNER, 3, null);
+        LedgerMember initial = member(22L, "member-uuid", 8L, LedgerRoles.EDITOR, 4, LocalDateTime.now());
+        LedgerMember latest = member(22L, "member-uuid", 8L, LedgerRoles.VIEWER, 9, null);
+        when(ledgerMapper.selectOne(any())).thenReturn(ledger());
+        when(memberMapper.selectOne(any())).thenReturn(owner, initial, latest);
+        when(memberMapper.update(isNull(), any())).thenReturn(0);
+        when(userMapper.selectById(8L)).thenReturn(user(8L));
+
+        VersionConflictException exception = assertThrows(VersionConflictException.class,
+                () -> loggedIn(() -> invokeRestore("ledger-uuid", "member-uuid", roleReq(4, "viewer"))));
+
+        assertMemberConflict(exception, 4, 9, false, LedgerRoles.VIEWER);
+        ArgumentCaptor<Wrapper<LedgerMember>> reload = memberWrapperCaptor();
+        verify(memberMapper, times(3)).selectOne(reload.capture());
+        assertTrue(reload.getAllValues().get(2).getSqlSegment().contains("FOR UPDATE"));
+        verify(changeLogService, never()).record(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void affectedZeroUpdateReauthorizesLatestAdminBeforeReturningConflict() {
+        LedgerMember admin = member(21L, "admin-member", 7L, LedgerRoles.ADMIN, 3, null);
+        LedgerMember initial = member(22L, "member-uuid", 8L, LedgerRoles.EDITOR, 4, null);
+        LedgerMember latestAdmin = member(22L, "member-uuid", 8L, LedgerRoles.ADMIN, 8, null);
+        when(ledgerMapper.selectOne(any())).thenReturn(ledger());
+        when(memberMapper.selectOne(any())).thenReturn(admin, initial, latestAdmin);
+        when(memberMapper.update(isNull(), any())).thenReturn(0);
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> loggedIn(() -> service.updateRole("ledger-uuid", "member-uuid", roleReq(4, "viewer"))));
+
+        assertForbiddenWithoutConflictData(exception);
+        assertLatestReloadUsedForUpdate();
+        verify(changeLogService, never()).record(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void affectedZeroRemoveReauthorizesLatestOwnerBeforeReturningConflict() {
+        LedgerMember admin = member(21L, "admin-member", 7L, LedgerRoles.ADMIN, 3, null);
+        LedgerMember initial = member(22L, "member-uuid", 8L, LedgerRoles.EDITOR, 4, null);
+        LedgerMember latestOwner = member(22L, "member-uuid", 8L, LedgerRoles.OWNER, 8, LocalDateTime.now());
+        when(ledgerMapper.selectOne(any())).thenReturn(ledger());
+        when(memberMapper.selectOne(any())).thenReturn(admin, initial, latestOwner);
+        when(memberMapper.update(isNull(), any())).thenReturn(0);
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> loggedIn(() -> invokeRemove("ledger-uuid", "member-uuid", deleteReq(4))));
+
+        assertForbiddenWithoutConflictData(exception);
+        assertLatestReloadUsedForUpdate();
+        verify(changeLogService, never()).record(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void affectedZeroRestoreReauthorizesLatestAdminBeforeReturningConflict() {
+        LedgerMember admin = member(21L, "admin-member", 7L, LedgerRoles.ADMIN, 3, null);
+        LedgerMember initial = member(22L, "member-uuid", 8L, LedgerRoles.EDITOR, 4, LocalDateTime.now());
+        LedgerMember latestAdmin = member(22L, "member-uuid", 8L, LedgerRoles.ADMIN, 8, LocalDateTime.now());
+        when(ledgerMapper.selectOne(any())).thenReturn(ledger());
+        when(memberMapper.selectOne(any())).thenReturn(admin, initial, latestAdmin);
+        when(memberMapper.update(isNull(), any())).thenReturn(0);
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> loggedIn(() -> invokeRestore("ledger-uuid", "member-uuid", roleReq(4, "viewer"))));
+
+        assertForbiddenWithoutConflictData(exception);
+        assertLatestReloadUsedForUpdate();
+        verify(changeLogService, never()).record(any(), any(), any(), any(), any());
+    }
+
+    @Test
     void ownerCanRemoveAdminWithVersionedSoftDelete() {
         LedgerMember owner = member(21L, "owner-member", 7L, LedgerRoles.OWNER, 3, null);
         LedgerMember target = member(22L, "member-uuid", 8L, LedgerRoles.ADMIN, 4, null);
@@ -209,6 +301,119 @@ class MemberServiceConcurrencyTests {
         VersionConflictException deletedRemove = assertThrows(VersionConflictException.class,
                 () -> loggedIn(() -> invokeRemove("ledger-uuid", "member-uuid", deleteReq(7))));
         assertMemberConflict(deletedRemove, 7, 7, true, LedgerRoles.EDITOR);
+        verify(changeLogService, never()).record(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void staleDeletedRestoreReturnsRemoteDeletedConflictBeforeWriting() {
+        LedgerMember owner = member(21L, "owner-member", 7L, LedgerRoles.OWNER, 3, null);
+        LedgerMember deleted = member(22L, "member-uuid", 8L, LedgerRoles.EDITOR, 7, LocalDateTime.now());
+        stubLedgerOperatorTarget(owner, deleted);
+        when(userMapper.selectById(8L)).thenReturn(user(8L));
+
+        VersionConflictException exception = assertThrows(VersionConflictException.class,
+                () -> loggedIn(() -> invokeRestore("ledger-uuid", "member-uuid", roleReq(4, "viewer"))));
+
+        assertMemberConflict(exception, 4, 7, true, LedgerRoles.EDITOR);
+        verify(memberMapper, never()).update(any(), any());
+        verify(changeLogService, never()).record(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void adminStaleUpdateOfCurrentAdminIsForbiddenWithoutConflictData() {
+        LedgerMember admin = member(21L, "admin-member", 7L, LedgerRoles.ADMIN, 3, null);
+        LedgerMember targetAdmin = member(22L, "member-uuid", 8L, LedgerRoles.ADMIN, 9, null);
+        stubLedgerOperatorTarget(admin, targetAdmin);
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> loggedIn(() -> service.updateRole("ledger-uuid", "member-uuid", roleReq(4, "editor"))));
+
+        assertForbiddenWithoutConflictData(exception);
+        verify(memberMapper, never()).update(any(), any());
+        verify(changeLogService, never()).record(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void adminStaleRemoveOfActiveAdminIsForbiddenWithoutConflictData() {
+        LedgerMember admin = member(21L, "admin-member", 7L, LedgerRoles.ADMIN, 3, null);
+        LedgerMember activeAdmin = member(22L, "member-uuid", 8L, LedgerRoles.ADMIN, 9, null);
+        stubLedgerOperatorTarget(admin, activeAdmin);
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> loggedIn(() -> invokeRemove("ledger-uuid", "member-uuid", deleteReq(4))));
+
+        assertForbiddenWithoutConflictData(exception);
+        verify(memberMapper, never()).update(any(), any());
+        verify(changeLogService, never()).record(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void adminRemoveOfDeletedAdminIsForbiddenWithoutConflictData() {
+        LedgerMember admin = member(21L, "admin-member", 7L, LedgerRoles.ADMIN, 3, null);
+        LedgerMember deletedAdmin = member(22L, "member-uuid", 8L, LedgerRoles.ADMIN, 10, LocalDateTime.now());
+        stubLedgerOperatorTarget(admin, deletedAdmin);
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> loggedIn(() -> invokeRemove("ledger-uuid", "member-uuid", deleteReq(4))));
+
+        assertForbiddenWithoutConflictData(exception);
+        verify(memberMapper, never()).update(any(), any());
+        verify(changeLogService, never()).record(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void adminStaleRestoreAsAdminIsForbiddenWithoutConflictData() {
+        LedgerMember admin = member(21L, "admin-member", 7L, LedgerRoles.ADMIN, 3, null);
+        LedgerMember deletedEditor = member(22L, "member-uuid", 8L, LedgerRoles.EDITOR, 9, LocalDateTime.now());
+        stubLedgerOperatorTarget(admin, deletedEditor);
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> loggedIn(() -> invokeRestore("ledger-uuid", "member-uuid", roleReq(4, "admin"))));
+
+        assertForbiddenWithoutConflictData(exception);
+        verify(memberMapper, never()).update(any(), any());
+        verify(changeLogService, never()).record(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void staleOwnerTargetUpdateIsForbiddenWithoutConflictData() {
+        LedgerMember ownerOperator = member(21L, "owner-operator", 7L, LedgerRoles.OWNER, 3, null);
+        LedgerMember staleOwner = member(22L, "member-uuid", 8L, LedgerRoles.OWNER, 9, null);
+        stubLedgerOperatorTarget(ownerOperator, staleOwner);
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> loggedIn(() -> service.updateRole("ledger-uuid", "member-uuid", roleReq(4, "viewer"))));
+
+        assertForbiddenWithoutConflictData(exception);
+        verify(memberMapper, never()).update(any(), any());
+        verify(changeLogService, never()).record(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void deletedOwnerTargetRemoveIsForbiddenWithoutConflictData() {
+        LedgerMember ownerOperator = member(21L, "owner-operator", 7L, LedgerRoles.OWNER, 3, null);
+        LedgerMember deletedOwner = member(22L, "member-uuid", 8L, LedgerRoles.OWNER, 10, LocalDateTime.now());
+        stubLedgerOperatorTarget(ownerOperator, deletedOwner);
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> loggedIn(() -> invokeRemove("ledger-uuid", "member-uuid", deleteReq(4))));
+
+        assertForbiddenWithoutConflictData(exception);
+        verify(memberMapper, never()).update(any(), any());
+        verify(changeLogService, never()).record(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void deletedOwnerTargetRestoreIsForbiddenWithoutConflictData() {
+        LedgerMember ownerOperator = member(21L, "owner-operator", 7L, LedgerRoles.OWNER, 3, null);
+        LedgerMember deletedOwner = member(22L, "member-uuid", 8L, LedgerRoles.OWNER, 10, LocalDateTime.now());
+        stubLedgerOperatorTarget(ownerOperator, deletedOwner);
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> loggedIn(() -> invokeRestore("ledger-uuid", "member-uuid", roleReq(4, "viewer"))));
+
+        assertForbiddenWithoutConflictData(exception);
+        verify(memberMapper, never()).update(any(), any());
         verify(changeLogService, never()).record(any(), any(), any(), any(), any());
     }
 
@@ -328,6 +533,17 @@ class MemberServiceConcurrencyTests {
         BusinessException exception = assertThrows(BusinessException.class,
                 () -> loggedIn(() -> service.updateRole("ledger-uuid", "member-uuid", roleReq(4, newRole))));
         assertEquals(ErrorCode.FORBIDDEN, exception.getErrorCode());
+    }
+
+    private void assertForbiddenWithoutConflictData(BusinessException exception) {
+        assertEquals(ErrorCode.FORBIDDEN, exception.getErrorCode());
+        assertNull(exception.getData());
+    }
+
+    private void assertLatestReloadUsedForUpdate() {
+        ArgumentCaptor<Wrapper<LedgerMember>> reload = memberWrapperCaptor();
+        verify(memberMapper, times(3)).selectOne(reload.capture());
+        assertTrue(reload.getAllValues().get(2).getSqlSegment().contains("FOR UPDATE"));
     }
 
     private void assertTransactional(String name, Class<?> requestType) throws Exception {
