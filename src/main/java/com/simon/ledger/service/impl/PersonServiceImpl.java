@@ -26,6 +26,7 @@ import com.simon.ledger.service.ChangeLogService;
 import com.simon.ledger.service.PersonService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
@@ -118,14 +119,15 @@ public class PersonServiceImpl extends ServiceImpl<LedgerPersonMapper, LedgerPer
     }
 
     @Override
-    @Transactional(rollbackFor = Exception.class)
+    @Transactional(isolation = Isolation.READ_COMMITTED, rollbackFor = Exception.class)
     public PersonResp create(String ledgerUuid, PersonCreateReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
         Ledger ledger = requireLedger(ledgerUuid);
         LedgerMember member = requireActiveMember(ledger.getId(), userId);
         requireManagePeoplePermission(member);
 
-        UserAccount linkedUser = findLinkedUser(req.getLinkedUserUuid());
+        UserAccount linkedUser = lockRequestedLinkedUser(req.getLinkedUserUuid());
+        linkedUser = requireRequestedLinkedUser(req.getLinkedUserUuid(), linkedUser);
         if (linkedUser != null) {
             ensureLinkedUserNotBound(ledger.getId(), linkedUser.getId(), null);
         } else {
@@ -145,18 +147,19 @@ public class PersonServiceImpl extends ServiceImpl<LedgerPersonMapper, LedgerPer
     }
 
     @Override
-    @Transactional(rollbackFor = Exception.class)
+    @Transactional(isolation = Isolation.READ_COMMITTED, rollbackFor = Exception.class)
     public PersonResp update(String ledgerUuid, String personUuid, PersonUpdateReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
         Ledger ledger = requireLedger(ledgerUuid);
         LedgerMember member = requireActiveMemberForUpdate(ledger.getId(), userId);
         requireManagePeoplePermission(member);
+        UserAccount linkedUser = lockRequestedLinkedUser(req.getLinkedUserUuid());
         LedgerPerson person = requirePersonForMutation(ledger.getId(), personUuid);
         if (person.getDeletedAt() != null || !Objects.equals(person.getVersion(), req.getVersion())) {
             throw personConflict(ledger, person, req.getVersion());
         }
 
-        UserAccount linkedUser = findLinkedUser(req.getLinkedUserUuid());
+        linkedUser = requireRequestedLinkedUser(req.getLinkedUserUuid(), linkedUser);
         if (linkedUser != null) {
             ensureLinkedUserNotBound(ledger.getId(), linkedUser.getId(), person.getId());
         } else {
@@ -192,7 +195,7 @@ public class PersonServiceImpl extends ServiceImpl<LedgerPersonMapper, LedgerPer
     }
 
     @Override
-    @Transactional(rollbackFor = Exception.class)
+    @Transactional(isolation = Isolation.READ_COMMITTED, rollbackFor = Exception.class)
     public VersionMutationResp delete(String ledgerUuid, String personUuid, VersionDeleteReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
         Ledger ledger = requireLedger(ledgerUuid);
@@ -224,18 +227,19 @@ public class PersonServiceImpl extends ServiceImpl<LedgerPersonMapper, LedgerPer
     }
 
     @Override
-    @Transactional(rollbackFor = Exception.class)
+    @Transactional(isolation = Isolation.READ_COMMITTED, rollbackFor = Exception.class)
     public PersonResp restore(String ledgerUuid, String personUuid, PersonUpdateReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
         Ledger ledger = requireLedger(ledgerUuid);
         LedgerMember member = requireActiveMemberForUpdate(ledger.getId(), userId);
         requireManagePeoplePermission(member);
+        UserAccount linkedUser = lockRequestedLinkedUser(req.getLinkedUserUuid());
         LedgerPerson person = requirePersonForMutation(ledger.getId(), personUuid);
         if (person.getDeletedAt() == null || !Objects.equals(person.getVersion(), req.getVersion())) {
             throw personConflict(ledger, person, req.getVersion());
         }
 
-        UserAccount linkedUser = findLinkedUser(req.getLinkedUserUuid());
+        linkedUser = requireRequestedLinkedUser(req.getLinkedUserUuid(), linkedUser);
         if (linkedUser != null) {
             ensureLinkedUserNotBound(ledger.getId(), linkedUser.getId(), person.getId());
         } else {
@@ -344,17 +348,22 @@ public class PersonServiceImpl extends ServiceImpl<LedgerPersonMapper, LedgerPer
         }
     }
 
-    private UserAccount findLinkedUser(String linkedUserUuid) {
+    private UserAccount lockRequestedLinkedUser(String linkedUserUuid) {
         if (!StringUtils.hasText(linkedUserUuid)) {
             return null;
         }
-        UserAccount user = userAccountMapper.selectOne(Wrappers.<UserAccount>lambdaQuery()
+        return userAccountMapper.selectOne(Wrappers.<UserAccount>lambdaQuery()
                 .eq(UserAccount::getUuid, linkedUserUuid.trim())
-                .isNull(UserAccount::getDeletedAt));
-        if (user == null) {
+                .isNull(UserAccount::getDeletedAt)
+                .orderByAsc(UserAccount::getId)
+                .last("FOR UPDATE"));
+    }
+
+    private UserAccount requireRequestedLinkedUser(String linkedUserUuid, UserAccount linkedUser) {
+        if (StringUtils.hasText(linkedUserUuid) && linkedUser == null) {
             throw new BusinessException(ErrorCode.NOT_FOUND, "绑定用户不存在");
         }
-        return user;
+        return linkedUser;
     }
 
     private void ensureLinkedUserNotBound(Long ledgerId, Long linkedUserId, Long currentPersonId) {
@@ -421,8 +430,7 @@ public class PersonServiceImpl extends ServiceImpl<LedgerPersonMapper, LedgerPer
         UserAccount linkedUser = person.getLinkedUserId() == null
                 ? null
                 : userAccountMapper.selectOne(Wrappers.<UserAccount>lambdaQuery()
-                        .eq(UserAccount::getId, person.getLinkedUserId())
-                        .last("FOR UPDATE"));
+                        .eq(UserAccount::getId, person.getLinkedUserId()));
         PersonResp snapshot = toResp(ledger, person, linkedUser);
         return new VersionConflictException(new ConflictResp(
                 "person",

@@ -11,6 +11,7 @@ import com.simon.ledger.common.LedgerRoles;
 import com.simon.ledger.common.exception.BusinessException;
 import com.simon.ledger.common.exception.VersionConflictException;
 import com.simon.ledger.controller.PersonController;
+import com.simon.ledger.dto.req.PersonCreateReq;
 import com.simon.ledger.dto.req.PersonUpdateReq;
 import com.simon.ledger.dto.req.VersionDeleteReq;
 import com.simon.ledger.dto.resp.ConflictResp;
@@ -32,6 +33,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -39,6 +41,7 @@ import org.springframework.http.MediaType;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
+import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.lang.reflect.InvocationTargetException;
@@ -50,6 +53,7 @@ import java.util.Set;
 import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -59,6 +63,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -106,9 +111,30 @@ class PersonServiceConcurrencyTests {
         verify(personMapper).update(isNull(), update.capture());
         assertAtomicWrapper(update.getValue(), "deleted_at IS NULL", 4, 5);
         assertSetColumns(update.getValue(), "linked_user_id", "name", "avatar", "version", "updated_at");
+        assertRequestedLinkedUserLockedBeforePersonRead("linked-user");
         assertOperatorReadLockedAndScoped();
         verify(personMapper, never()).updateById(any(LedgerPerson.class));
         verify(changeLogService).record(11L, "person", "person-uuid", "update", 7L);
+    }
+
+    @Test
+    void createLocksRequestedLinkedUserBeforePersonUniquenessReadAndInsert() {
+        stubLedgerAndOperator(LedgerRoles.OWNER);
+        when(userMapper.selectOne(any())).thenReturn(user(8L, "linked-user"));
+        when(personMapper.selectOne(any())).thenReturn(null);
+        when(personMapper.insert(any(LedgerPerson.class))).thenReturn(1);
+
+        PersonResp response = loggedIn(() -> service.create("ledger-uuid",
+                createReq("Linked Name", "avatar.png", "linked-user")));
+
+        assertEquals("linked-user", response.getLinkedUserUuid());
+        InOrder order = inOrder(userMapper, personMapper);
+        ArgumentCaptor<Wrapper<UserAccount>> requestedUserRead = userWrapperCaptor();
+        order.verify(userMapper).selectOne(requestedUserRead.capture());
+        order.verify(personMapper).selectOne(any());
+        order.verify(personMapper).insert(any(LedgerPerson.class));
+        assertRequestedLinkedUserLock(requestedUserRead.getValue(), "linked-user");
+        verify(changeLogService).record(eq(11L), eq("person"), any(), eq("create"), eq(7L));
     }
 
     @Test
@@ -148,6 +174,7 @@ class PersonServiceConcurrencyTests {
         verify(personMapper).update(isNull(), update.capture());
         assertAtomicWrapper(update.getValue(), "deleted_at IS NOT NULL", 5, 6);
         assertSetColumns(update.getValue(), "linked_user_id", "name", "avatar", "deleted_at", "updated_at", "version");
+        assertRequestedLinkedUserLockedBeforePersonRead("new-linked-user");
         assertOperatorReadLockedAndScoped();
         verify(changeLogService).record(11L, "person", "person-uuid", "update", 7L);
     }
@@ -198,13 +225,18 @@ class PersonServiceConcurrencyTests {
         LedgerPerson target = person(22L, "person-uuid", null, "Remote", 5, null);
         stubLedgerAndOperator(LedgerRoles.OWNER);
         when(personMapper.selectOne(any())).thenReturn(target);
+        when(userMapper.selectOne(any())).thenReturn(null);
 
         VersionConflictException exception = assertThrows(VersionConflictException.class,
                 () -> loggedIn(() -> service.update("ledger-uuid", "person-uuid",
                         updateReq(4, "Requested", "", "missing-linked-user"))));
 
         assertPersonConflict(exception, 4, 5, false, null, "Remote");
-        verify(userMapper, never()).selectOne(any());
+        InOrder order = inOrder(userMapper, personMapper);
+        ArgumentCaptor<Wrapper<UserAccount>> requestedUserRead = userWrapperCaptor();
+        order.verify(userMapper).selectOne(requestedUserRead.capture());
+        order.verify(personMapper).selectOne(any());
+        assertRequestedLinkedUserLock(requestedUserRead.getValue(), "missing-linked-user");
         verify(personMapper, times(1)).selectOne(any());
         verify(personMapper, never()).update(isNull(), any());
         verify(changeLogService, never()).record(any(), any(), any(), any(), any());
@@ -336,7 +368,7 @@ class PersonServiceConcurrencyTests {
         ArgumentCaptor<Wrapper<UserAccount>> linkedUserRead = userWrapperCaptor();
         verify(userMapper).selectOne(linkedUserRead.capture());
         AbstractWrapper<?, ?, ?> linkedUserWrapper = (AbstractWrapper<?, ?, ?>) linkedUserRead.getValue();
-        assertTrue(linkedUserWrapper.getSqlSegment().contains("FOR UPDATE"));
+        assertFalse(linkedUserWrapper.getSqlSegment().contains("FOR UPDATE"));
         assertTrue(linkedUserWrapper.getSqlSegment().matches("(?s).*\\bid\\b\\s*=.*"));
         assertTrue(linkedUserWrapper.getParamNameValuePairs().containsValue(9L));
         verify(userMapper, never()).selectById(any());
@@ -351,11 +383,12 @@ class PersonServiceConcurrencyTests {
             boolean restore = "restore".equals(operation);
             LedgerPerson initial = person(22L, "person-uuid", null, "Initial", 4,
                     restore ? LocalDateTime.now() : null);
-            LedgerPerson latest = person(22L, "person-uuid", null, "Latest", 5,
+            LedgerPerson latest = person(22L, "person-uuid", 9L, "Latest", 5,
                     restore ? null : LocalDateTime.now());
             stubLedgerAndOperator(LedgerRoles.OWNER);
             when(personMapper.selectOne(any())).thenReturn(initial, restore ? null : latest, latest);
             when(personMapper.update(isNull(), any())).thenReturn(0);
+            when(userMapper.selectOne(any())).thenReturn(user(9L, "latest-linked-user"));
 
             VersionConflictException exception = assertThrows(VersionConflictException.class, () -> loggedIn(() -> {
                 if (restore) {
@@ -371,6 +404,12 @@ class PersonServiceConcurrencyTests {
             int expectedReads = restore ? 3 : 2;
             verify(personMapper, times(expectedReads)).selectOne(reads.capture());
             assertTrue(reads.getAllValues().get(expectedReads - 1).getSqlSegment().contains("FOR UPDATE"));
+            ArgumentCaptor<Wrapper<UserAccount>> linkedUserRead = userWrapperCaptor();
+            verify(userMapper).selectOne(linkedUserRead.capture());
+            AbstractWrapper<?, ?, ?> linkedUserWrapper = (AbstractWrapper<?, ?, ?>) linkedUserRead.getValue();
+            assertFalse(linkedUserWrapper.getSqlSegment().contains("FOR UPDATE"));
+            assertTrue(linkedUserWrapper.getSqlSegment().matches("(?s).*\\bid\\b\\s*=.*"));
+            assertTrue(linkedUserWrapper.getParamNameValuePairs().containsValue(9L));
             verify(changeLogService, never()).record(any(), any(), any(), any(), any());
         }
     }
@@ -434,9 +473,10 @@ class PersonServiceConcurrencyTests {
 
     @Test
     void writeMethodsAreTransactionalAndExposeVersionedSignatures() throws Exception {
-        assertTransactional("update", PersonUpdateReq.class);
-        assertTransactional("delete", VersionDeleteReq.class);
-        assertTransactional("restore", PersonUpdateReq.class);
+        assertTransactional("create", String.class, PersonCreateReq.class);
+        assertTransactional("update", String.class, String.class, PersonUpdateReq.class);
+        assertTransactional("delete", String.class, String.class, VersionDeleteReq.class);
+        assertTransactional("restore", String.class, String.class, PersonUpdateReq.class);
         assertEquals(PersonResp.class, PersonService.class
                 .getMethod("update", String.class, String.class, PersonUpdateReq.class).getReturnType());
         assertEquals(VersionMutationResp.class, PersonService.class
@@ -445,11 +485,12 @@ class PersonServiceConcurrencyTests {
                 .getMethod("restore", String.class, String.class, PersonUpdateReq.class).getReturnType());
     }
 
-    private void assertTransactional(String name, Class<?> requestType) throws Exception {
-        Method method = PersonServiceImpl.class.getMethod(name, String.class, String.class, requestType);
+    private void assertTransactional(String name, Class<?>... parameterTypes) throws Exception {
+        Method method = PersonServiceImpl.class.getMethod(name, parameterTypes);
         Transactional annotation = method.getAnnotation(Transactional.class);
         assertNotNull(annotation);
         assertEquals(Set.of(Exception.class), Set.of(annotation.rollbackFor()));
+        assertEquals(Isolation.READ_COMMITTED, annotation.isolation());
     }
 
     private void assertAtomicWrapper(LambdaUpdateWrapper<?> wrapper, String deletedPredicate,
@@ -489,6 +530,26 @@ class PersonServiceConcurrencyTests {
         AbstractWrapper<?, ?, ?> wrapper = (AbstractWrapper<?, ?, ?>) read;
         assertTrue(wrapper.getSqlSegment().matches("(?s).*\\bid\\b\\s*<>.*"));
         assertTrue(wrapper.getParamNameValuePairs().containsValue(22L));
+    }
+
+    private void assertRequestedLinkedUserLockedBeforePersonRead(String linkedUserUuid) {
+        InOrder order = inOrder(userMapper, personMapper);
+        ArgumentCaptor<Wrapper<UserAccount>> requestedUserRead = userWrapperCaptor();
+        order.verify(userMapper).selectOne(requestedUserRead.capture());
+        order.verify(personMapper, times(2)).selectOne(any());
+        order.verify(personMapper).update(isNull(), any());
+        verify(userMapper, times(1)).selectOne(any());
+        assertRequestedLinkedUserLock(requestedUserRead.getValue(), linkedUserUuid);
+    }
+
+    private void assertRequestedLinkedUserLock(Wrapper<UserAccount> read, String linkedUserUuid) {
+        AbstractWrapper<?, ?, ?> wrapper = (AbstractWrapper<?, ?, ?>) read;
+        String sql = wrapper.getSqlSegment();
+        assertTrue(sql.matches("(?s).*\\buuid\\b\\s*=.*"));
+        assertTrue(sql.contains("deleted_at IS NULL"));
+        assertTrue(sql.contains("ORDER BY id ASC"));
+        assertTrue(sql.contains("FOR UPDATE"));
+        assertTrue(wrapper.getParamNameValuePairs().containsValue(linkedUserUuid));
     }
 
     private void assertPersonResponse(PersonResp response, String linkedUserUuid, String name,
@@ -576,6 +637,14 @@ class PersonServiceConcurrencyTests {
     private PersonUpdateReq updateReq(int version, String name, String avatar, String linkedUserUuid) {
         PersonUpdateReq req = new PersonUpdateReq();
         req.setVersion(version);
+        req.setName(name);
+        req.setAvatar(avatar);
+        req.setLinkedUserUuid(linkedUserUuid);
+        return req;
+    }
+
+    private PersonCreateReq createReq(String name, String avatar, String linkedUserUuid) {
+        PersonCreateReq req = new PersonCreateReq();
         req.setName(name);
         req.setAvatar(avatar);
         req.setLinkedUserUuid(linkedUserUuid);
