@@ -288,7 +288,9 @@ class PersonServiceConcurrencyTests {
 
         assertEquals(ErrorCode.BAD_REQUEST, exception.getErrorCode());
         verify(userMapper).selectOne(any());
-        verify(personMapper, times(2)).selectOne(any());
+        ArgumentCaptor<Wrapper<LedgerPerson>> reads = personWrapperCaptor();
+        verify(personMapper, times(2)).selectOne(reads.capture());
+        assertUniquenessReadExcludesCurrentPerson(reads.getAllValues().get(1));
         verify(personMapper, never()).update(isNull(), any());
     }
 
@@ -304,7 +306,9 @@ class PersonServiceConcurrencyTests {
                         updateReq(4, " Duplicate ", "", null))));
 
         assertEquals(ErrorCode.BAD_REQUEST, exception.getErrorCode());
-        verify(personMapper, times(2)).selectOne(any());
+        ArgumentCaptor<Wrapper<LedgerPerson>> reads = personWrapperCaptor();
+        verify(personMapper, times(2)).selectOne(reads.capture());
+        assertUniquenessReadExcludesCurrentPerson(reads.getAllValues().get(1));
         verify(personMapper, never()).update(isNull(), any());
     }
 
@@ -472,6 +476,12 @@ class PersonServiceConcurrencyTests {
         assertTrue(wrapper.getParamNameValuePairs().containsValue(11L));
         assertTrue(wrapper.getParamNameValuePairs().containsValue(7L));
         assertTrue(wrapper.getParamNameValuePairs().containsValue(1));
+    }
+
+    private void assertUniquenessReadExcludesCurrentPerson(Wrapper<LedgerPerson> read) {
+        AbstractWrapper<?, ?, ?> wrapper = (AbstractWrapper<?, ?, ?>) read;
+        assertTrue(wrapper.getSqlSegment().matches("(?s).*\\bid\\b\\s*<>.*"));
+        assertTrue(wrapper.getParamNameValuePairs().containsValue(22L));
     }
 
     private void assertPersonResponse(PersonResp response, String linkedUserUuid, String name,

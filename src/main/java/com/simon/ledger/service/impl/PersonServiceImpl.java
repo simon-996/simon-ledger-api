@@ -361,8 +361,9 @@ public class PersonServiceImpl extends ServiceImpl<LedgerPersonMapper, LedgerPer
         LedgerPerson exists = baseMapper.selectOne(Wrappers.<LedgerPerson>lambdaQuery()
                 .eq(LedgerPerson::getLedgerId, ledgerId)
                 .eq(LedgerPerson::getLinkedUserId, linkedUserId)
+                .ne(currentPersonId != null, LedgerPerson::getId, currentPersonId)
                 .isNull(LedgerPerson::getDeletedAt));
-        if (exists != null && !Objects.equals(exists.getId(), currentPersonId)) {
+        if (exists != null) {
             throw new BusinessException(ErrorCode.BAD_REQUEST, "该用户已绑定到账本参与人");
         }
     }
@@ -373,8 +374,9 @@ public class PersonServiceImpl extends ServiceImpl<LedgerPersonMapper, LedgerPer
                 .eq(LedgerPerson::getLedgerId, ledgerId)
                 .isNull(LedgerPerson::getLinkedUserId)
                 .eq(LedgerPerson::getName, normalizedName)
+                .ne(currentPersonId != null, LedgerPerson::getId, currentPersonId)
                 .isNull(LedgerPerson::getDeletedAt));
-        if (exists != null && !Objects.equals(exists.getId(), currentPersonId)) {
+        if (exists != null) {
             throw new BusinessException(ErrorCode.BAD_REQUEST, "手动参与人名称不能重复");
         }
     }
