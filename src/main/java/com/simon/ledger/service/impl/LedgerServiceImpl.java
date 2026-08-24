@@ -244,7 +244,7 @@ public class LedgerServiceImpl extends ServiceImpl<LedgerMapper, Ledger> impleme
     @Transactional(rollbackFor = Exception.class)
     public VersionMutationResp leave(String ledgerUuid, VersionDeleteReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
-        Ledger ledger = requireLedgerForMutation(ledgerUuid);
+        Ledger ledger = requireActiveLedgerForMutation(ledgerUuid);
         LedgerMember member = ledgerMemberMapper.selectOne(Wrappers.<LedgerMember>lambdaQuery()
                 .eq(LedgerMember::getLedgerId, ledger.getId())
                 .eq(LedgerMember::getUserId, userId)
@@ -309,6 +309,17 @@ public class LedgerServiceImpl extends ServiceImpl<LedgerMapper, Ledger> impleme
     private Ledger requireLedgerForMutation(String ledgerUuid) {
         Ledger ledger = baseMapper.selectOne(Wrappers.<Ledger>lambdaQuery()
                 .eq(Ledger::getUuid, ledgerUuid)
+                .last("FOR UPDATE"));
+        if (ledger == null) {
+            throw new BusinessException(ErrorCode.NOT_FOUND, "账本不存在");
+        }
+        return ledger;
+    }
+
+    private Ledger requireActiveLedgerForMutation(String ledgerUuid) {
+        Ledger ledger = baseMapper.selectOne(Wrappers.<Ledger>lambdaQuery()
+                .eq(Ledger::getUuid, ledgerUuid)
+                .isNull(Ledger::getDeletedAt)
                 .last("FOR UPDATE"));
         if (ledger == null) {
             throw new BusinessException(ErrorCode.NOT_FOUND, "账本不存在");

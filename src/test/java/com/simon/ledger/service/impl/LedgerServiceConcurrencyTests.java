@@ -259,6 +259,29 @@ class LedgerServiceConcurrencyTests {
     }
 
     @Test
+    void leaveLocksOnlyActiveLedgerAndDeletedLedgerIsNotFoundBeforeMemberWriteOrLog() {
+        Ledger deletedLedger = ledger(8, LocalDateTime.now());
+        when(ledgerMapper.selectOne(any())).thenAnswer(invocation -> {
+            com.baomidou.mybatisplus.core.conditions.AbstractWrapper<?, ?, ?> wrapper = invocation.getArgument(0);
+            return wrapper.getSqlSegment().contains("deleted_at IS NULL") ? null : deletedLedger;
+        });
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> loggedIn(() -> service.leave("ledger-uuid", deleteReq(4))));
+
+        assertEquals(ErrorCode.NOT_FOUND, exception.getErrorCode());
+        ArgumentCaptor<Wrapper<Ledger>> ledgerRead = ledgerWrapperCaptor();
+        verify(ledgerMapper).selectOne(ledgerRead.capture());
+        String sql = ((com.baomidou.mybatisplus.core.conditions.AbstractWrapper<?, ?, ?>)
+                ledgerRead.getValue()).getSqlSegment();
+        assertTrue(sql.contains("deleted_at IS NULL"));
+        assertTrue(sql.contains("FOR UPDATE"));
+        verify(memberMapper, never()).selectOne(any());
+        verify(memberMapper, never()).update(any(), any());
+        verify(changeLogService, never()).record(any(), any(), any(), any(), any());
+    }
+
+    @Test
     void staleOrAlreadyRemovedLeaveReturnsSafeMemberConflictAndOwnerIsForbidden() {
         Ledger ledger = ledger(8, null);
         LedgerMember stale = member("editor", 5, null);

@@ -23,25 +23,42 @@ import com.simon.ledger.mapper.LedgerPersonMapper;
 import com.simon.ledger.mapper.UserAccountMapper;
 import com.simon.ledger.service.AuthService;
 import com.simon.ledger.service.ChangeLogService;
-import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.StringUtils;
 
 import java.util.List;
 import java.time.LocalDateTime;
+import java.util.HashSet;
 import java.util.Objects;
+import java.util.Set;
 
 @Service
-@RequiredArgsConstructor
 public class AuthServiceImpl extends ServiceImpl<UserAccountMapper, UserAccount> implements AuthService {
 
     private static final int STATUS_NORMAL = 1;
     private static final int STATUS_DISABLED = 2;
+    private static final int PROFILE_LEDGER_LOCK_MAX_ATTEMPTS = 3;
 
     private final LedgerPersonMapper ledgerPersonMapper;
     private final LedgerMapper ledgerMapper;
     private final ChangeLogService changeLogService;
+    private final TransactionTemplate profileUpdateTransactions;
+
+    public AuthServiceImpl(
+            LedgerPersonMapper ledgerPersonMapper,
+            LedgerMapper ledgerMapper,
+            ChangeLogService changeLogService,
+            PlatformTransactionManager transactionManager
+    ) {
+        this.ledgerPersonMapper = ledgerPersonMapper;
+        this.ledgerMapper = ledgerMapper;
+        this.changeLogService = changeLogService;
+        this.profileUpdateTransactions = new TransactionTemplate(transactionManager);
+        this.profileUpdateTransactions.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+    }
 
     @Override
     public AuthUserResp register(AuthRegisterReq req) {
@@ -111,9 +128,26 @@ public class AuthServiceImpl extends ServiceImpl<UserAccountMapper, UserAccount>
     }
 
     @Override
-    @Transactional(rollbackFor = Exception.class)
     public AuthUserResp updateProfile(AuthProfileUpdateReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
+        for (int attempt = 1; attempt <= PROFILE_LEDGER_LOCK_MAX_ATTEMPTS; attempt++) {
+            try {
+                AuthUserResp response = profileUpdateTransactions.execute(
+                        status -> updateProfileOnce(userId, req));
+                if (response == null) {
+                    throw new BusinessException(ErrorCode.SYSTEM_ERROR);
+                }
+                return response;
+            } catch (ProfileLedgerLockDriftException exception) {
+                if (attempt == PROFILE_LEDGER_LOCK_MAX_ATTEMPTS) {
+                    throw new BusinessException(ErrorCode.CONFLICT, "关联账本状态变化，请重试");
+                }
+            }
+        }
+        throw new BusinessException(ErrorCode.CONFLICT, "关联账本状态变化，请重试");
+    }
+
+    private AuthUserResp updateProfileOnce(Long userId, AuthProfileUpdateReq req) {
         List<Long> linkedLedgerIds = discoverActiveLinkedLedgerIds(userId);
         lockLedgerNamespaces(linkedLedgerIds);
         UserAccount user = requireCurrentProfileForUpdate(userId);
@@ -124,6 +158,9 @@ public class AuthServiceImpl extends ServiceImpl<UserAccountMapper, UserAccount>
         if (!Objects.equals(req.getVersion(), user.getVersion())) {
             throw profileConflict(req.getVersion(), user);
         }
+
+        List<LedgerPerson> linkedPeople = lockCurrentLinkedPeople(userId);
+        requireStableLedgerNamespaces(linkedLedgerIds, linkedPeople);
 
         String nickname = req.getNickname().trim();
         String avatar = normalize(req.getAvatar());
@@ -146,7 +183,7 @@ public class AuthServiceImpl extends ServiceImpl<UserAccountMapper, UserAccount>
         user.setAvatar(avatar);
         user.setVersion(nextVersion);
         user.setUpdatedAt(updatedAt);
-        syncLinkedPeople(userId, user);
+        syncLockedPeople(userId, user, linkedPeople);
         return toUserResp(user);
     }
 
@@ -185,12 +222,26 @@ public class AuthServiceImpl extends ServiceImpl<UserAccountMapper, UserAccount>
         return user;
     }
 
-    private void syncLinkedPeople(Long userId, UserAccount user) {
-        List<LedgerPerson> people = ledgerPersonMapper.selectList(Wrappers.<LedgerPerson>lambdaQuery()
+    private List<LedgerPerson> lockCurrentLinkedPeople(Long userId) {
+        return ledgerPersonMapper.selectList(Wrappers.<LedgerPerson>lambdaQuery()
                 .eq(LedgerPerson::getLinkedUserId, userId)
                 .isNull(LedgerPerson::getDeletedAt)
                 .orderByAsc(LedgerPerson::getId)
                 .last("FOR UPDATE"));
+    }
+
+    private void requireStableLedgerNamespaces(List<Long> lockedLedgerIds, List<LedgerPerson> people) {
+        Set<Long> locked = new HashSet<>(lockedLedgerIds);
+        boolean drifted = people.stream()
+                .map(LedgerPerson::getLedgerId)
+                .filter(Objects::nonNull)
+                .anyMatch(ledgerId -> !locked.contains(ledgerId));
+        if (drifted) {
+            throw new ProfileLedgerLockDriftException();
+        }
+    }
+
+    private void syncLockedPeople(Long userId, UserAccount user, List<LedgerPerson> people) {
         LocalDateTime peopleUpdatedAt = LocalDateTime.now();
         for (LedgerPerson person : people) {
             int affected = ledgerPersonMapper.update(null, Wrappers.<LedgerPerson>lambdaUpdate()
@@ -206,6 +257,9 @@ public class AuthServiceImpl extends ServiceImpl<UserAccountMapper, UserAccount>
                 changeLogService.record(person.getLedgerId(), "person", person.getUuid(), "update", userId);
             }
         }
+    }
+
+    private static final class ProfileLedgerLockDriftException extends RuntimeException {
     }
 
     private VersionConflictException profileConflict(Integer submittedVersion, UserAccount remote) {

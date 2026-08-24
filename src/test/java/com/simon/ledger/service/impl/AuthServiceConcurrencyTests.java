@@ -29,7 +29,10 @@ import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.test.util.ReflectionTestUtils;
-import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.TransactionStatus;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -46,6 +49,8 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -61,6 +66,10 @@ class AuthServiceConcurrencyTests {
     private LedgerMapper ledgerMapper;
     @Mock
     private ChangeLogService changeLogService;
+    @Mock
+    private PlatformTransactionManager transactionManager;
+    @Mock
+    private TransactionStatus transactionStatus;
 
     private AuthServiceImpl service;
 
@@ -69,7 +78,8 @@ class AuthServiceConcurrencyTests {
         initializeLambdaMetadata(UserAccount.class);
         initializeLambdaMetadata(Ledger.class);
         initializeLambdaMetadata(LedgerPerson.class);
-        service = new AuthServiceImpl(ledgerPersonMapper, ledgerMapper, changeLogService);
+        lenient().when(transactionManager.getTransaction(any())).thenReturn(transactionStatus);
+        service = new AuthServiceImpl(ledgerPersonMapper, ledgerMapper, changeLogService, transactionManager);
         ReflectionTestUtils.setField(service, "baseMapper", userAccountMapper);
     }
 
@@ -126,8 +136,8 @@ class AuthServiceConcurrencyTests {
         order.verify(ledgerPersonMapper).selectObjs(discovery.capture());
         order.verify(ledgerMapper).selectList(ledgerLock.capture());
         order.verify(userAccountMapper).selectOne(userLock.capture());
-        order.verify(userAccountMapper).update(isNull(), any());
         order.verify(ledgerPersonMapper).selectList(peopleLock.capture());
+        order.verify(userAccountMapper).update(isNull(), any());
         order.verify(ledgerPersonMapper).update(isNull(), any());
         order.verify(changeLogService).record(11L, "person", "person-first", "update", 7L);
         order.verify(ledgerPersonMapper).update(isNull(), any());
@@ -137,7 +147,76 @@ class AuthServiceConcurrencyTests {
         assertLedgerNamespaceLock(ledgerLock.getValue(), 11L, 22L);
         assertCurrentUserLock(userLock.getValue());
         assertCurrentPeopleLock(peopleLock.getValue());
+        verify(ledgerMapper, times(1)).selectList(any());
+        verify(transactionManager, times(1)).getTransaction(any());
         verify(userAccountMapper, never()).selectById(7L);
+    }
+
+    @Test
+    void actualLinkedLedgerDriftRollsBackAndRetriesWithExpandedSortedNamespace() {
+        TransactionStatus firstAttempt = mock(TransactionStatus.class);
+        TransactionStatus retryAttempt = mock(TransactionStatus.class);
+        when(transactionManager.getTransaction(any())).thenReturn(firstAttempt, retryAttempt);
+        UserAccount firstRead = user(2);
+        UserAccount retryRead = user(2);
+        LedgerPerson first = person(8L, "person-first", 11L);
+        LedgerPerson newlyLinked = person(9L, "person-new", 22L);
+        when(ledgerPersonMapper.selectObjs(any()))
+                .thenReturn(List.of(11L), List.of(22L, 11L));
+        when(ledgerMapper.selectList(any()))
+                .thenReturn(List.of(ledger(11L)), List.of(ledger(11L), ledger(22L)));
+        when(userAccountMapper.selectOne(any())).thenReturn(firstRead, retryRead);
+        when(ledgerPersonMapper.selectList(any()))
+                .thenReturn(List.of(first, newlyLinked), List.of(first, newlyLinked));
+        when(userAccountMapper.update(isNull(), any())).thenReturn(1);
+        when(ledgerPersonMapper.update(isNull(), any())).thenReturn(1);
+
+        AuthUserResp response = withLoggedInUser(() -> service.updateProfile(request(2)));
+
+        assertEquals(3, response.getVersion());
+        verify(ledgerPersonMapper, times(2)).selectObjs(any());
+        ArgumentCaptor<Wrapper<Ledger>> ledgerLocks = ledgerWrapperCaptor();
+        verify(ledgerMapper, times(2)).selectList(ledgerLocks.capture());
+        assertLedgerNamespaceLock(ledgerLocks.getAllValues().get(0), 11L);
+        assertLedgerNamespaceLock(ledgerLocks.getAllValues().get(1), 11L, 22L);
+        verify(userAccountMapper, times(1)).update(isNull(), any());
+        verify(changeLogService).record(11L, "person", "person-first", "update", 7L);
+        verify(changeLogService).record(22L, "person", "person-new", "update", 7L);
+        verify(transactionManager, times(2)).getTransaction(any());
+        verify(transactionManager).rollback(firstAttempt);
+        verify(transactionManager, never()).commit(firstAttempt);
+        verify(transactionManager).commit(retryAttempt);
+        InOrder transactionOrder = inOrder(transactionManager, userAccountMapper, changeLogService);
+        transactionOrder.verify(transactionManager).getTransaction(any());
+        transactionOrder.verify(transactionManager).rollback(firstAttempt);
+        transactionOrder.verify(transactionManager).getTransaction(any());
+        transactionOrder.verify(userAccountMapper).update(isNull(), any());
+        transactionOrder.verify(changeLogService).record(11L, "person", "person-first", "update", 7L);
+        transactionOrder.verify(changeLogService).record(22L, "person", "person-new", "update", 7L);
+        transactionOrder.verify(transactionManager).commit(retryAttempt);
+    }
+
+    @Test
+    void repeatedLinkedLedgerDriftExhaustionReturnsGenericConflictWithoutWritesOrLogs() {
+        LedgerPerson known = person(8L, "person-known", 11L);
+        LedgerPerson drifted = person(9L, "person-drifted", 22L);
+        when(ledgerPersonMapper.selectObjs(any())).thenReturn(List.of(11L));
+        when(ledgerMapper.selectList(any())).thenReturn(List.of(ledger(11L)));
+        when(userAccountMapper.selectOne(any())).thenReturn(user(2));
+        when(ledgerPersonMapper.selectList(any())).thenReturn(List.of(known, drifted));
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> withLoggedInUser(() -> service.updateProfile(request(2))));
+
+        assertEquals(ErrorCode.CONFLICT, exception.getErrorCode());
+        assertEquals("关联账本状态变化，请重试", exception.getMessage());
+        verify(ledgerPersonMapper, times(3)).selectObjs(any());
+        verify(userAccountMapper, never()).update(any(), any());
+        verify(ledgerPersonMapper, never()).update(any(), any());
+        verify(changeLogService, never()).record(any(), any(), any(), any(), any());
+        verify(transactionManager, times(3)).getTransaction(any());
+        verify(transactionManager, times(3)).rollback(transactionStatus);
+        verify(transactionManager, never()).commit(any());
     }
 
     @Test
@@ -174,6 +253,8 @@ class AuthServiceConcurrencyTests {
         assertProfileConflict(exception, 2, 3, user);
         verify(userAccountMapper, never()).update(any(), any());
         verify(userAccountMapper, never()).updateById(any(UserAccount.class));
+        verify(transactionManager, times(1)).getTransaction(any());
+        verify(transactionManager, times(1)).rollback(transactionStatus);
     }
 
     @Test
@@ -251,9 +332,9 @@ class AuthServiceConcurrencyTests {
         InOrder order = inOrder(ledgerMapper, userAccountMapper, ledgerPersonMapper);
         order.verify(ledgerMapper).selectList(any());
         order.verify(userAccountMapper).selectOne(any());
-        order.verify(userAccountMapper).update(isNull(), any());
         ArgumentCaptor<Wrapper<LedgerPerson>> currentPeople = personWrapperCaptor();
         order.verify(ledgerPersonMapper).selectList(currentPeople.capture());
+        order.verify(userAccountMapper).update(isNull(), any());
         assertCurrentPeopleLock(currentPeople.getValue());
         verify(ledgerPersonMapper, never()).update(isNull(), any());
         verify(changeLogService, never()).record(any(), any(), any(), any(), any());
@@ -280,11 +361,13 @@ class AuthServiceConcurrencyTests {
     }
 
     @Test
-    void profileUpdateRemainsTransactionalForAllExceptions() throws Exception {
+    void profileUpdateUsesIndependentRequiresNewTransactionsForRealRetryBoundaries() throws Exception {
         Method method = AuthServiceImpl.class.getMethod("updateProfile", AuthProfileUpdateReq.class);
-        Transactional transactional = method.getAnnotation(Transactional.class);
-        assertNotNull(transactional);
-        assertEquals(Set.of(Exception.class), Set.of(transactional.rollbackFor()));
+        assertEquals(null, method.getAnnotation(org.springframework.transaction.annotation.Transactional.class));
+        TransactionTemplate template = (TransactionTemplate) ReflectionTestUtils.getField(
+                service, "profileUpdateTransactions");
+        assertNotNull(template);
+        assertEquals(TransactionDefinition.PROPAGATION_REQUIRES_NEW, template.getPropagationBehavior());
     }
 
     private void verifyUserUpdateWrapper(int expectedVersion) {
