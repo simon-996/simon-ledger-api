@@ -2,6 +2,7 @@ package com.simon.ledger.concurrency;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
 import com.simon.ledger.common.ErrorCode;
 import com.simon.ledger.common.Result;
 import com.simon.ledger.dto.resp.ConflictResp;
@@ -13,27 +14,55 @@ import com.simon.ledger.dto.resp.ProfileConflictSnapshotResp;
 import com.simon.ledger.dto.resp.TransactionResp;
 import com.simon.ledger.dto.resp.VersionMutationResp;
 import org.junit.jupiter.api.Test;
-import org.springframework.http.converter.json.Jackson2ObjectMapperBuilder;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.json.JsonTest;
+import org.springframework.context.ApplicationContext;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.test.context.ContextConfiguration;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
 
+import javax.sql.DataSource;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+@JsonTest
+@ContextConfiguration(classes = ConflictResponseContractTests.JsonSliceConfiguration.class)
 class ConflictResponseContractTests {
 
     private static final String CONFLICT_MESSAGE = "数据已被其他设备修改";
     private static final Set<String> INTERNAL_OR_SENSITIVE_FIELDS = Set.of(
             "id", "passwordHash", "token", "deletedAt");
 
-    private final ObjectMapper objectMapper = Jackson2ObjectMapperBuilder.json().build();
+    @Autowired
+    private ObjectMapper objectMapper;
+
+    @Autowired
+    private ApplicationContext applicationContext;
+
+    @Configuration(proxyBeanMethods = false)
+    static class JsonSliceConfiguration {
+    }
+
+    @Test
+    void usesBootManagedObjectMapperFromJsonSlice() throws Exception {
+        assertTrue(getClass().isAnnotationPresent(JsonTest.class));
+        assertNotNull(getClass().getDeclaredField("objectMapper").getAnnotation(Autowired.class));
+        assertSame(applicationContext.getBean(ObjectMapper.class), objectMapper);
+        assertFalse(objectMapper.isEnabled(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS));
+        assertTrue(applicationContext.getBeansOfType(DataSource.class).isEmpty());
+    }
 
     @Test
     void profileConflictSerializesSafeRealSnapshot() throws Exception {
@@ -78,13 +107,24 @@ class ConflictResponseContractTests {
         JsonNode remote = assertCommonContract(root, "ledger", "ledger-uuid", 3, 4, false);
         assertExactFields(remote, "uuid", "name", "baseCurrencyCode", "exchangeRateToCny", "version",
                 "role", "memberCount", "members", "createdAt", "updatedAt");
+        assertText(remote, "uuid", "ledger-uuid");
+        assertText(remote, "name", "远端账本");
+        assertText(remote, "baseCurrencyCode", "CNY");
+        assertNumber(remote, "exchangeRateToCny", new BigDecimal("1.00000000"));
         assertInteger(remote, "version", 4);
-        assertTrue(remote.path("exchangeRateToCny").isNumber());
+        assertText(remote, "role", "owner");
         assertInteger(remote, "memberCount", 1);
         assertTrue(remote.path("members").isArray());
+        assertEquals(1, remote.path("members").size());
+        assertIsoDateTime(remote, "createdAt", LocalDateTime.of(2026, 8, 24, 9, 0));
+        assertIsoDateTime(remote, "updatedAt", LocalDateTime.of(2026, 8, 24, 10, 0));
         JsonNode serializedMember = remote.path("members").get(0);
         assertExactFields(serializedMember, "uuid", "userUuid", "nickname", "avatar", "role", "version");
+        assertText(serializedMember, "uuid", "member-uuid");
         assertText(serializedMember, "userUuid", "member-user-uuid");
+        assertText(serializedMember, "nickname", "成员昵称");
+        assertText(serializedMember, "avatar", "member.png");
+        assertText(serializedMember, "role", "editor");
         assertInteger(serializedMember, "version", 6);
         assertNoInternalOrSensitiveFields(root);
     }
@@ -106,10 +146,14 @@ class ConflictResponseContractTests {
         JsonNode remote = assertCommonContract(root, "member", "member-uuid", 3, 4, false);
         assertExactFields(remote, "uuid", "userUuid", "nickname", "avatar", "role", "status", "version",
                 "joinedAt");
+        assertText(remote, "uuid", "member-uuid");
         assertText(remote, "userUuid", "member-user-uuid");
+        assertText(remote, "nickname", "成员昵称");
+        assertText(remote, "avatar", "member.png");
         assertText(remote, "role", "admin");
         assertInteger(remote, "status", 1);
         assertInteger(remote, "version", 4);
+        assertIsoDateTime(remote, "joinedAt", LocalDateTime.of(2026, 8, 24, 9, 0));
         assertNoInternalOrSensitiveFields(root);
     }
 
@@ -130,9 +174,14 @@ class ConflictResponseContractTests {
         JsonNode remote = assertCommonContract(root, "person", "person-uuid", 3, 4, true);
         assertExactFields(remote, "uuid", "ledgerUuid", "linkedUserUuid", "name", "avatar", "version",
                 "createdAt", "updatedAt");
+        assertText(remote, "uuid", "person-uuid");
         assertText(remote, "ledgerUuid", "ledger-uuid");
         assertText(remote, "linkedUserUuid", "linked-user-uuid");
+        assertText(remote, "name", "远端参与人");
+        assertText(remote, "avatar", "person.png");
         assertInteger(remote, "version", 4);
+        assertIsoDateTime(remote, "createdAt", LocalDateTime.of(2026, 8, 24, 9, 0));
+        assertIsoDateTime(remote, "updatedAt", LocalDateTime.of(2026, 8, 24, 10, 0));
         assertNoInternalOrSensitiveFields(root);
     }
 
@@ -167,19 +216,91 @@ class ConflictResponseContractTests {
                 "category", "note", "createdByUserUuid", "createdByNickname", "createdByAvatar",
                 "lastModifiedByUserUuid", "lastModifiedByNickname", "lastModifiedByAvatar", "clientOperationId",
                 "version", "happenedAt", "createdAt", "updatedAt", "personUuids");
+        assertText(remote, "uuid", "transaction-uuid");
+        assertText(remote, "ledgerUuid", "ledger-uuid");
+        assertInteger(remote, "type", 0);
         assertText(remote, "payerPersonUuid", "payer-person-uuid");
+        assertNumber(remote, "amount", new BigDecimal("88.50"));
+        assertText(remote, "currencyCode", "CNY");
+        assertText(remote, "category", "餐饮");
+        assertText(remote, "note", "远端备注");
         assertText(remote, "createdByUserUuid", "creator-user-uuid");
         assertText(remote, "createdByNickname", "创建者");
         assertText(remote, "createdByAvatar", "creator.png");
         assertText(remote, "lastModifiedByUserUuid", "modifier-user-uuid");
         assertText(remote, "lastModifiedByNickname", "修改者");
         assertText(remote, "lastModifiedByAvatar", "modifier.png");
+        assertText(remote, "clientOperationId", "client-operation-uuid");
         assertInteger(remote, "version", 4);
+        assertIsoDateTime(remote, "happenedAt", LocalDateTime.of(2026, 8, 24, 8, 0));
+        assertIsoDateTime(remote, "createdAt", LocalDateTime.of(2026, 8, 24, 9, 0));
+        assertIsoDateTime(remote, "updatedAt", LocalDateTime.of(2026, 8, 24, 10, 0));
         assertTrue(remote.path("personUuids").isArray());
+        assertTrue(remote.path("personUuids").get(0).isTextual());
+        assertTrue(remote.path("personUuids").get(1).isTextual());
         assertEquals(List.of("person-uuid-1", "person-uuid-2"),
                 objectMapper.convertValue(remote.path("personUuids"),
                         objectMapper.getTypeFactory().constructCollectionType(List.class, String.class)));
         assertNoInternalOrSensitiveFields(root);
+    }
+
+    @Test
+    void nullablePublicSnapshotFieldsRemainExplicitJsonNull() throws Exception {
+        ProfileConflictSnapshotResp profile =
+                new ProfileConflictSnapshotResp("user-uuid", "远端昵称", null, 4);
+        JsonNode profileRemote = assertCommonContract(
+                conflictJson("profile", "user-uuid", 3, 4, false, profile),
+                "profile", "user-uuid", 3, 4, false);
+        assertNullNode(profileRemote, "avatar");
+
+        PersonResp person = new PersonResp();
+        person.setUuid("person-uuid");
+        person.setLedgerUuid("ledger-uuid");
+        person.setLinkedUserUuid(null);
+        person.setName("手动参与人");
+        person.setAvatar("");
+        person.setVersion(4);
+        person.setCreatedAt(LocalDateTime.of(2026, 8, 24, 9, 0));
+        person.setUpdatedAt(LocalDateTime.of(2026, 8, 24, 10, 0));
+        JsonNode personRemote = assertCommonContract(
+                conflictJson("person", "person-uuid", 3, 4, false, person),
+                "person", "person-uuid", 3, 4, false);
+        assertNullNode(personRemote, "linkedUserUuid");
+        assertText(personRemote, "avatar", "");
+
+        TransactionResp transaction = new TransactionResp();
+        transaction.setUuid("transaction-uuid");
+        transaction.setLedgerUuid("ledger-uuid");
+        transaction.setType(1);
+        transaction.setPayerPersonUuid(null);
+        transaction.setAmount(new BigDecimal("25.00"));
+        transaction.setCurrencyCode("CNY");
+        transaction.setCategory("工资");
+        transaction.setNote(null);
+        transaction.setCreatedByUserUuid("creator-user-uuid");
+        transaction.setCreatedByNickname("创建者");
+        transaction.setCreatedByAvatar(null);
+        transaction.setLastModifiedByUserUuid(null);
+        transaction.setLastModifiedByNickname(null);
+        transaction.setLastModifiedByAvatar(null);
+        transaction.setClientOperationId(null);
+        transaction.setVersion(4);
+        transaction.setHappenedAt(LocalDateTime.of(2026, 8, 24, 8, 0));
+        transaction.setCreatedAt(LocalDateTime.of(2026, 8, 24, 9, 0));
+        transaction.setUpdatedAt(LocalDateTime.of(2026, 8, 24, 10, 0));
+        transaction.setPersonUuids(List.of());
+        JsonNode transactionRemote = assertCommonContract(
+                conflictJson("transaction", "transaction-uuid", 3, 4, false, transaction),
+                "transaction", "transaction-uuid", 3, 4, false);
+        for (String field : List.of("payerPersonUuid", "note", "createdByAvatar", "lastModifiedByUserUuid",
+                "lastModifiedByNickname", "lastModifiedByAvatar", "clientOperationId")) {
+            assertNullNode(transactionRemote, field);
+        }
+        assertTrue(transactionRemote.path("personUuids").isArray());
+        assertTrue(transactionRemote.path("personUuids").isEmpty());
+        assertNoInternalOrSensitiveFields(profileRemote);
+        assertNoInternalOrSensitiveFields(personRemote);
+        assertNoInternalOrSensitiveFields(transactionRemote);
     }
 
     @Test
@@ -191,6 +312,7 @@ class ConflictResponseContractTests {
         assertInteger(root, "code", 0);
         assertText(root, "message", "ok");
         JsonNode data = root.path("data");
+        assertTrue(data.isObject());
         assertExactFields(data, "uuid", "version", "deleted");
         assertText(data, "uuid", "transaction-uuid");
         assertInteger(data, "version", 5);
@@ -254,6 +376,20 @@ class ConflictResponseContractTests {
     private void assertInteger(JsonNode node, String field, int expected) {
         assertTrue(node.path(field).isIntegralNumber(), field);
         assertEquals(expected, node.path(field).asInt(), field);
+    }
+
+    private void assertNumber(JsonNode node, String field, BigDecimal expected) {
+        assertTrue(node.path(field).isNumber(), field);
+        assertEquals(0, expected.compareTo(node.path(field).decimalValue()), field);
+    }
+
+    private void assertIsoDateTime(JsonNode node, String field, LocalDateTime expected) {
+        assertText(node, field, DateTimeFormatter.ISO_LOCAL_DATE_TIME.format(expected));
+    }
+
+    private void assertNullNode(JsonNode node, String field) {
+        assertTrue(node.has(field), field);
+        assertTrue(node.get(field).isNull(), field);
     }
 
     private void assertNoInternalOrSensitiveFields(JsonNode root) {
