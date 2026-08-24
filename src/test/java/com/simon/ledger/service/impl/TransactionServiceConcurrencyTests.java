@@ -11,6 +11,7 @@ import com.simon.ledger.common.LedgerRoles;
 import com.simon.ledger.common.exception.BusinessException;
 import com.simon.ledger.common.exception.VersionConflictException;
 import com.simon.ledger.controller.TransactionController;
+import com.simon.ledger.dto.req.TransactionCreateReq;
 import com.simon.ledger.dto.req.TransactionUpdateReq;
 import com.simon.ledger.dto.req.VersionDeleteReq;
 import com.simon.ledger.dto.resp.ConflictResp;
@@ -137,6 +138,98 @@ class TransactionServiceConcurrencyTests {
         order.verify(relationMapper).delete(any());
         order.verify(relationMapper).insert(any(LedgerTransactionPerson.class));
         order.verify(changeLogService).record(11L, "transaction", "transaction-uuid", "update", 7L);
+    }
+
+    @Test
+    void createLocksOperatorThenUserThenMergedOrderedPeopleAndReusesLockedResponseData() {
+        LedgerPerson payer = person(42L, "payer-person");
+        when(ledgerMapper.selectOne(any())).thenReturn(ledger());
+        when(memberMapper.selectOne(any())).thenReturn(operator(LedgerRoles.EDITOR));
+        when(userMapper.selectList(any())).thenReturn(List.of(user(7L, "creator-user", "Creator")));
+        when(personMapper.selectList(any())).thenAnswer(invocation -> {
+            AbstractWrapper<?, ?, ?> wrapper = (AbstractWrapper<?, ?, ?>) invocation.getArgument(0);
+            String sql = wrapper.getSqlSegment();
+            if (sql.contains("ledger_id") && wrapper.getParamNameValuePairs().size() >= 3) {
+                return List.of(person(41L, "person-a"), payer);
+            }
+            if (sql.contains("ledger_id")) {
+                return List.of(person(41L, "person-a"));
+            }
+            return List.of(payer);
+        });
+        org.mockito.Mockito.lenient().when(personMapper.selectOne(any())).thenReturn(payer);
+        when(transactionMapper.insert(any(LedgerTransaction.class))).thenAnswer(invocation -> {
+            LedgerTransaction inserted = invocation.getArgument(0);
+            inserted.setId(31L);
+            inserted.setCreatedAt(LocalDateTime.of(2026, 8, 21, 12, 1));
+            inserted.setUpdatedAt(LocalDateTime.of(2026, 8, 21, 12, 1));
+            return 1;
+        });
+        TransactionCreateReq req = createReq("new-operation", "payer-person", List.of("person-a"));
+
+        TransactionResp response = loggedIn(() -> service.create("ledger-uuid", req));
+
+        assertEquals("creator-user", response.getCreatedByUserUuid());
+        assertEquals("payer-person", response.getPayerPersonUuid());
+        assertEquals(List.of("person-a"), response.getPersonUuids());
+        assertOperatorReadLockedAndScoped();
+        ArgumentCaptor<Wrapper<LedgerTransaction>> existingRead = transactionWrapperCaptor();
+        verify(transactionMapper).selectOne(existingRead.capture());
+        assertTrue(existingRead.getValue().getSqlSegment().contains("FOR UPDATE"));
+        ArgumentCaptor<Wrapper<UserAccount>> userRead = userWrapperCaptor();
+        verify(userMapper, times(1)).selectList(userRead.capture());
+        assertOrderedForUpdate((AbstractWrapper<?, ?, ?>) userRead.getValue());
+        ArgumentCaptor<Wrapper<LedgerPerson>> peopleRead = personWrapperCaptor();
+        verify(personMapper, times(1)).selectList(peopleRead.capture());
+        AbstractWrapper<?, ?, ?> peopleWrapper = (AbstractWrapper<?, ?, ?>) peopleRead.getValue();
+        assertOrderedForUpdate(peopleWrapper);
+        assertTrue(peopleWrapper.getParamNameValuePairs().containsValue("person-a"));
+        assertTrue(peopleWrapper.getParamNameValuePairs().containsValue("payer-person"));
+        verify(personMapper, never()).selectOne(any());
+        InOrder order = inOrder(memberMapper, userMapper, personMapper, transactionMapper, relationMapper);
+        order.verify(memberMapper).selectOne(any());
+        order.verify(userMapper).selectList(any());
+        order.verify(personMapper).selectList(any());
+        order.verify(transactionMapper).insert(any(LedgerTransaction.class));
+        order.verify(relationMapper).insert(any(LedgerTransactionPerson.class));
+    }
+
+    @Test
+    void existingClientOperationReplayRechecksLockedPermissionThenUsesUserRelationPersonOrder() {
+        LedgerTransaction existing = transaction(31L, "existing-transaction", 7L, 3, null);
+        existing.setPayerPersonId(42L);
+        existing.setLastModifiedByUserId(9L);
+        when(ledgerMapper.selectOne(any())).thenReturn(ledger());
+        when(memberMapper.selectOne(any())).thenReturn(operator(LedgerRoles.EDITOR));
+        when(transactionMapper.selectOne(any())).thenReturn(existing);
+        when(userMapper.selectList(any())).thenReturn(List.of(
+                user(7L, "creator-user", "Creator"), user(9L, "modifier-user", "Modifier")));
+        when(relationMapper.selectList(any())).thenReturn(List.of(relation(31L, 43L)));
+        when(personMapper.selectList(any())).thenReturn(
+                List.of(person(42L, "payer-person"), person(43L, "existing-person")));
+
+        TransactionResp response = loggedIn(() -> service.create(
+                "ledger-uuid", createReq("same-operation", "ignored-payer", List.of("ignored-person"))));
+
+        assertEquals("existing-transaction", response.getUuid());
+        assertEquals("creator-user", response.getCreatedByUserUuid());
+        assertEquals("Modifier", response.getLastModifiedByNickname());
+        assertEquals("payer-person", response.getPayerPersonUuid());
+        assertEquals(List.of("existing-person"), response.getPersonUuids());
+        assertOperatorReadLockedAndScoped();
+        ArgumentCaptor<Wrapper<LedgerTransaction>> existingRead = transactionWrapperCaptor();
+        verify(transactionMapper).selectOne(existingRead.capture());
+        assertTrue(existingRead.getValue().getSqlSegment().contains("FOR UPDATE"));
+        InOrder order = inOrder(userMapper, relationMapper, personMapper);
+        order.verify(userMapper).selectList(any());
+        order.verify(relationMapper).selectList(any());
+        order.verify(personMapper).selectList(any());
+        verify(userMapper, times(1)).selectList(any());
+        verify(personMapper, times(1)).selectList(any());
+        verify(transactionMapper, never()).insert(any(LedgerTransaction.class));
+        verify(relationMapper, never()).delete(any());
+        verify(relationMapper, never()).insert(any(LedgerTransactionPerson.class));
+        verify(changeLogService, never()).record(any(), any(), any(), any(), any());
     }
 
     @Test
@@ -549,6 +642,20 @@ class TransactionServiceConcurrencyTests {
         req.setCategory(" income ");
         req.setNote("   ");
         req.setHappenedAt(LocalDateTime.of(2026, 8, 21, 12, 0));
+        req.setPersonUuids(personUuids);
+        return req;
+    }
+
+    private TransactionCreateReq createReq(String clientOperationId, String payerUuid, List<String> personUuids) {
+        TransactionCreateReq req = new TransactionCreateReq();
+        req.setType(0);
+        req.setPayerPersonUuid(payerUuid);
+        req.setAmount(new BigDecimal("12.50"));
+        req.setCurrencyCode(" cny ");
+        req.setCategory(" expense ");
+        req.setNote("   ");
+        req.setHappenedAt(LocalDateTime.of(2026, 8, 21, 12, 0));
+        req.setClientOperationId(clientOperationId);
         req.setPersonUuids(personUuids);
         return req;
     }

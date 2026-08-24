@@ -107,17 +107,27 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
     public TransactionResp create(String ledgerUuid, TransactionCreateReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
         Ledger ledger = requireLedger(ledgerUuid);
-        LedgerMember member = requireActiveMember(ledger.getId(), userId);
+        LedgerMember member = requireActiveMemberForUpdate(ledger.getId(), userId);
         if (!LedgerRoles.canCreateTransaction(member.getRole())) {
             throw new BusinessException(ErrorCode.FORBIDDEN);
         }
         validateType(req.getType());
         LedgerTransaction exists = findByClientOperationId(ledger.getId(), userId, req.getClientOperationId());
         if (exists != null) {
-            return toResp(ledger, exists, peopleByTransactionId(exists.getId(), true), userMap(List.of(exists)));
+            Map<Long, UserAccount> lockedUsers = lockResponseUsers(exists);
+            LockedPeople lockedPeople = lockCurrentTransactionPeople(exists);
+            return toResp(
+                    ledger,
+                    exists,
+                    lockedPeople.people(),
+                    lockedUsers,
+                    payerPersonUuidMap(lockedPeople.payer()));
         }
-        List<LedgerPerson> people = requirePeople(ledger.getId(), req.getPersonUuids());
-        LedgerPerson payer = resolvePayer(ledger.getId(), req.getType(), req.getPayerPersonUuid());
+        Map<Long, UserAccount> lockedUsers = lockUsers(Stream.of(userId));
+        LockedPeople lockedPeople = lockRequestedPeople(
+                ledger.getId(), req.getType(), req.getPayerPersonUuid(), req.getPersonUuids());
+        List<LedgerPerson> people = lockedPeople.people();
+        LedgerPerson payer = lockedPeople.payer();
 
         LedgerTransaction transaction = new LedgerTransaction();
         transaction.setUuid(IdUtil.fastSimpleUUID());
@@ -137,7 +147,7 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
 
         replacePeople(transaction.getId(), people);
         changeLogService.record(ledger.getId(), "transaction", transaction.getUuid(), "create", userId);
-        return toResp(ledger, transaction, people, userMap(List.of(transaction)));
+        return toResp(ledger, transaction, people, lockedUsers, payerPersonUuidMap(payer));
     }
 
     @Override
@@ -290,12 +300,12 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
         if (!StringUtils.hasText(clientOperationId)) {
             return null;
         }
-        return lambdaQuery()
+        return baseMapper.selectOne(Wrappers.<LedgerTransaction>lambdaQuery()
                 .eq(LedgerTransaction::getLedgerId, ledgerId)
                 .eq(LedgerTransaction::getCreatedByUserId, userId)
                 .eq(LedgerTransaction::getClientOperationId, clientOperationId.trim())
                 .isNull(LedgerTransaction::getDeletedAt)
-                .one();
+                .last("FOR UPDATE"));
     }
 
     private Ledger requireLedger(String ledgerUuid) {
@@ -380,25 +390,6 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
         return person;
     }
 
-    private List<LedgerPerson> requirePeople(Long ledgerId, List<String> personUuids) {
-        List<String> uuids = personUuids.stream()
-                .filter(StringUtils::hasText)
-                .map(String::trim)
-                .distinct()
-                .toList();
-        if (uuids.isEmpty()) {
-            throw new BusinessException(ErrorCode.BAD_REQUEST, "参与人不能为空");
-        }
-        List<LedgerPerson> people = ledgerPersonMapper.selectList(Wrappers.<LedgerPerson>lambdaQuery()
-                .eq(LedgerPerson::getLedgerId, ledgerId)
-                .in(LedgerPerson::getUuid, uuids)
-                .isNull(LedgerPerson::getDeletedAt));
-        if (people.size() != uuids.size()) {
-            throw new BusinessException(ErrorCode.BAD_REQUEST, "参与人不存在或已删除");
-        }
-        return people;
-    }
-
     private LockedPeople lockRequestedPeople(
             Long ledgerId,
             Integer type,
@@ -445,13 +436,6 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
                 .map(String::trim)
                 .distinct()
                 .toList();
-    }
-
-    private LedgerPerson resolvePayer(Long ledgerId, Integer type, String payerPersonUuid) {
-        if (!Objects.equals(TYPE_EXPENSE, type) || !StringUtils.hasText(payerPersonUuid)) {
-            return null;
-        }
-        return requirePerson(ledgerId, payerPersonUuid.trim(), false);
     }
 
     private void replacePeople(Long transactionId, List<LedgerPerson> people) {
