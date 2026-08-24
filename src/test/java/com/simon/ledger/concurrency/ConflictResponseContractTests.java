@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.simon.ledger.common.ErrorCode;
 import com.simon.ledger.common.Result;
+import com.simon.ledger.SimonLedgerApiApplication;
 import com.simon.ledger.dto.resp.ConflictResp;
 import com.simon.ledger.dto.resp.LedgerMemberSummaryResp;
 import com.simon.ledger.dto.resp.LedgerResp;
@@ -13,12 +14,20 @@ import com.simon.ledger.dto.resp.PersonResp;
 import com.simon.ledger.dto.resp.ProfileConflictSnapshotResp;
 import com.simon.ledger.dto.resp.TransactionResp;
 import com.simon.ledger.dto.resp.VersionMutationResp;
+import org.apache.ibatis.mapping.Environment;
+import org.apache.ibatis.session.SqlSessionFactory;
+import org.apache.ibatis.session.defaults.DefaultSqlSessionFactory;
+import org.apache.ibatis.transaction.jdbc.JdbcTransactionFactory;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.test.autoconfigure.json.JsonTest;
 import org.springframework.context.ApplicationContext;
-import org.springframework.context.annotation.Configuration;
-import org.springframework.test.context.ContextConfiguration;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Import;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
@@ -28,6 +37,7 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
+import java.util.stream.Stream;
 
 import javax.sql.DataSource;
 
@@ -36,14 +46,16 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
 
 @JsonTest
-@ContextConfiguration(classes = ConflictResponseContractTests.JsonSliceConfiguration.class)
+@Import(ConflictResponseContractTests.NoDatabaseMyBatisTestConfiguration.class)
 class ConflictResponseContractTests {
 
     private static final String CONFLICT_MESSAGE = "数据已被其他设备修改";
     private static final Set<String> INTERNAL_OR_SENSITIVE_FIELDS = Set.of(
-            "id", "passwordHash", "token", "deletedAt");
+            "passwordHash", "token", "deletedAt");
+    private static final Set<String> PUBLIC_ID_FIELDS = Set.of("clientOperationId");
 
     @Autowired
     private ObjectMapper objectMapper;
@@ -51,8 +63,17 @@ class ConflictResponseContractTests {
     @Autowired
     private ApplicationContext applicationContext;
 
-    @Configuration(proxyBeanMethods = false)
-    static class JsonSliceConfiguration {
+    @TestConfiguration(proxyBeanMethods = false)
+    static class NoDatabaseMyBatisTestConfiguration {
+
+        @Bean
+        SqlSessionFactory sqlSessionFactory() {
+            Environment environment = new Environment(
+                    "json-contract-test",
+                    new JdbcTransactionFactory(),
+                    mock(DataSource.class));
+            return new DefaultSqlSessionFactory(new org.apache.ibatis.session.Configuration(environment));
+        }
     }
 
     @Test
@@ -62,6 +83,42 @@ class ConflictResponseContractTests {
         assertSame(applicationContext.getBean(ObjectMapper.class), objectMapper);
         assertFalse(objectMapper.isEnabled(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS));
         assertTrue(applicationContext.getBeansOfType(DataSource.class).isEmpty());
+    }
+
+    @Test
+    void jsonSliceUsesProductionApplicationAsItsConfigurationSource() {
+        assertFalse(applicationContext.getBeansOfType(SimonLedgerApiApplication.class).isEmpty());
+    }
+
+    @ParameterizedTest
+    @MethodSource("unsafeInternalIdFields")
+    void recursiveSafetyRejectsInternalIdFieldsRegardlessOfValueType(
+            String json,
+            String expectedPath) throws Exception {
+        assertEquals(List.of(expectedPath), internalOrSensitiveFields(objectMapper.readTree(json)));
+    }
+
+    @Test
+    void recursiveSafetyAllowsPublicUuidAndClientOperationIdFields() throws Exception {
+        JsonNode safe = objectMapper.readTree("""
+                {
+                  "entityUuid": "entity-uuid",
+                  "userUuid": "user-uuid",
+                  "payerPersonUuid": null,
+                  "nested": {"linkedUserUuid": "linked-user-uuid"},
+                  "clientOperationId": "operation-uuid"
+                }
+                """);
+
+        assertTrue(internalOrSensitiveFields(safe).isEmpty());
+    }
+
+    private static Stream<Arguments> unsafeInternalIdFields() {
+        return Stream.of(
+                Arguments.of("{\"id\":null}", "$.id"),
+                Arguments.of("{\"userId\":\"7\"}", "$.userId"),
+                Arguments.of("{\"nested\":{\"ownerUserId\":null}}", "$.nested.ownerUserId"),
+                Arguments.of("{\"items\":[{\"personId\":{\"value\":1}}]}", "$.items[0].personId"));
     }
 
     @Test
@@ -393,9 +450,14 @@ class ConflictResponseContractTests {
     }
 
     private void assertNoInternalOrSensitiveFields(JsonNode root) {
+        List<String> found = internalOrSensitiveFields(root);
+        assertTrue(found.isEmpty(), "internal/sensitive JSON fields: " + found);
+    }
+
+    private List<String> internalOrSensitiveFields(JsonNode root) {
         List<String> found = new ArrayList<>();
         collectForbiddenFields(root, "$", found);
-        assertTrue(found.isEmpty(), "internal/sensitive JSON fields: " + found);
+        return found;
     }
 
     private void collectForbiddenFields(JsonNode node, String path, List<String> found) {
@@ -404,9 +466,9 @@ class ConflictResponseContractTests {
             while (names.hasNext()) {
                 String name = names.next();
                 JsonNode value = node.path(name);
-                boolean numericInternalId = value.isIntegralNumber()
-                        && (name.equals("id") || name.endsWith("Id"));
-                if (INTERNAL_OR_SENSITIVE_FIELDS.contains(name) || numericInternalId) {
+                boolean internalIdField = (name.equals("id") || name.endsWith("Id"))
+                        && !PUBLIC_ID_FIELDS.contains(name);
+                if (INTERNAL_OR_SENSITIVE_FIELDS.contains(name) || internalIdField) {
                     found.add(path + "." + name);
                 }
                 collectForbiddenFields(value, path + "." + name, found);
