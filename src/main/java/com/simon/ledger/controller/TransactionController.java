@@ -2,11 +2,12 @@ package com.simon.ledger.controller;
 
 import com.simon.ledger.common.Result;
 import com.simon.ledger.dto.req.TransactionCreateReq;
-import com.simon.ledger.dto.req.TransactionDeleteReq;
 import com.simon.ledger.dto.req.TransactionListReq;
 import com.simon.ledger.dto.req.TransactionUpdateReq;
+import com.simon.ledger.dto.req.VersionDeleteReq;
 import com.simon.ledger.dto.resp.PageResp;
 import com.simon.ledger.dto.resp.TransactionResp;
+import com.simon.ledger.dto.resp.VersionMutationResp;
 import com.simon.ledger.service.IdempotencyService;
 import com.simon.ledger.service.TransactionService;
 import io.swagger.v3.oas.annotations.Operation;
@@ -86,18 +87,35 @@ public class TransactionController {
 
     @Operation(summary = "删除流水")
     @DeleteMapping("/{transactionUuid}")
-    public Result<Void> delete(
+    public Result<VersionMutationResp> delete(
             @PathVariable String ledgerUuid,
             @PathVariable String transactionUuid,
             @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
-            @Valid @RequestBody TransactionDeleteReq req
+            @Valid @RequestBody VersionDeleteReq req
     ) {
-        idempotencyService.executeVoid(
+        return Result.ok(idempotencyService.execute(
                 idempotencyKey,
                 "DELETE",
                 "/api/ledgers/" + ledgerUuid + "/transactions/" + transactionUuid,
+                VersionMutationResp.class,
                 () -> transactionService.delete(ledgerUuid, transactionUuid, req)
-        );
-        return Result.ok();
+        ));
+    }
+
+    @Operation(summary = "恢复流水")
+    @PostMapping("/{transactionUuid}/restore")
+    public Result<TransactionResp> restore(
+            @PathVariable String ledgerUuid,
+            @PathVariable String transactionUuid,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            @Valid @RequestBody TransactionUpdateReq req
+    ) {
+        return Result.ok(idempotencyService.execute(
+                idempotencyKey,
+                "POST",
+                "/api/ledgers/" + ledgerUuid + "/transactions/" + transactionUuid + "/restore",
+                TransactionResp.class,
+                () -> transactionService.restore(ledgerUuid, transactionUuid, req)
+        ));
     }
 }

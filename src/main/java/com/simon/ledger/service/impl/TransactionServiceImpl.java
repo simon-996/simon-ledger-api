@@ -10,12 +10,15 @@ import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.simon.ledger.common.ErrorCode;
 import com.simon.ledger.common.LedgerRoles;
 import com.simon.ledger.common.exception.BusinessException;
+import com.simon.ledger.common.exception.VersionConflictException;
 import com.simon.ledger.dto.req.TransactionCreateReq;
-import com.simon.ledger.dto.req.TransactionDeleteReq;
 import com.simon.ledger.dto.req.TransactionListReq;
 import com.simon.ledger.dto.req.TransactionUpdateReq;
+import com.simon.ledger.dto.req.VersionDeleteReq;
+import com.simon.ledger.dto.resp.ConflictResp;
 import com.simon.ledger.dto.resp.PageResp;
 import com.simon.ledger.dto.resp.TransactionResp;
+import com.simon.ledger.dto.resp.VersionMutationResp;
 import com.simon.ledger.entity.Ledger;
 import com.simon.ledger.entity.LedgerMember;
 import com.simon.ledger.entity.LedgerPerson;
@@ -151,47 +154,130 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
     public TransactionResp update(String ledgerUuid, String transactionUuid, TransactionUpdateReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
         Ledger ledger = requireLedger(ledgerUuid);
-        LedgerMember member = requireActiveMember(ledger.getId(), userId);
-        LedgerTransaction transaction = requireTransaction(ledger.getId(), transactionUuid);
+        LedgerMember member = requireActiveMemberForUpdate(ledger.getId(), userId);
+        LedgerTransaction transaction = requireTransactionForMutation(ledger.getId(), transactionUuid);
         requireEditPermission(member, transaction, userId);
-        requireCurrentVersion(transaction, req.getVersion());
+        if (transaction.getDeletedAt() != null || !Objects.equals(transaction.getVersion(), req.getVersion())) {
+            throw transactionConflict(ledger, transaction, req.getVersion());
+        }
         validateType(req.getType());
-        List<LedgerPerson> people = requirePeople(ledger.getId(), req.getPersonUuids());
-        LedgerPerson payer = resolvePayer(ledger.getId(), req.getType(), req.getPayerPersonUuid());
+        List<LedgerPerson> people = requirePeopleForUpdate(ledger.getId(), req.getPersonUuids());
+        LedgerPerson payer = resolvePayerForUpdate(ledger.getId(), req.getType(), req.getPayerPersonUuid());
 
-        transaction.setType(req.getType());
-        transaction.setPayerPersonId(payer == null ? null : payer.getId());
-        transaction.setAmount(req.getAmount());
-        transaction.setCurrencyCode(req.getCurrencyCode().trim().toUpperCase());
-        transaction.setCategory(req.getCategory().trim());
-        transaction.setNote(normalize(req.getNote()));
-        transaction.setLastModifiedByUserId(userId);
-        transaction.setVersion(transaction.getVersion() + 1);
-        transaction.setHappenedAt(req.getHappenedAt());
-        updateById(transaction);
+        Long payerPersonId = payer == null ? null : payer.getId();
+        String currencyCode = req.getCurrencyCode().trim().toUpperCase();
+        String category = req.getCategory().trim();
+        String note = normalize(req.getNote());
+        LocalDateTime updatedAt = LocalDateTime.now();
+        int nextVersion = req.getVersion() + 1;
+        int affected = baseMapper.update(null, Wrappers.<LedgerTransaction>lambdaUpdate()
+                .eq(LedgerTransaction::getId, transaction.getId())
+                .eq(LedgerTransaction::getVersion, req.getVersion())
+                .isNull(LedgerTransaction::getDeletedAt)
+                .set(LedgerTransaction::getType, req.getType())
+                .set(LedgerTransaction::getPayerPersonId, payerPersonId)
+                .set(LedgerTransaction::getAmount, req.getAmount())
+                .set(LedgerTransaction::getCurrencyCode, currencyCode)
+                .set(LedgerTransaction::getCategory, category)
+                .set(LedgerTransaction::getNote, note)
+                .set(LedgerTransaction::getHappenedAt, req.getHappenedAt())
+                .set(LedgerTransaction::getLastModifiedByUserId, userId)
+                .set(LedgerTransaction::getDeletedAt, null)
+                .set(LedgerTransaction::getUpdatedAt, updatedAt)
+                .set(LedgerTransaction::getVersion, nextVersion));
+        if (affected == 0) {
+            LedgerTransaction latest = reloadTransactionForUpdate(transaction.getId(), transactionUuid);
+            requireEditPermission(member, latest, userId);
+            throw transactionConflict(ledger, latest, req.getVersion());
+        }
+        applyUpdate(transaction, req, payerPersonId, userId, currencyCode, category, note, updatedAt, nextVersion);
 
         replacePeople(transaction.getId(), people);
         changeLogService.record(ledger.getId(), "transaction", transaction.getUuid(), "update", userId);
-        return toResp(ledger, transaction, people, userMap(List.of(transaction)));
+        return toCurrentResp(ledger, transaction, people);
     }
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public void delete(String ledgerUuid, String transactionUuid, TransactionDeleteReq req) {
+    public VersionMutationResp delete(String ledgerUuid, String transactionUuid, VersionDeleteReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
         Ledger ledger = requireLedger(ledgerUuid);
-        LedgerMember member = requireActiveMember(ledger.getId(), userId);
-        LedgerTransaction transaction = requireTransaction(ledger.getId(), transactionUuid);
-        if (!LedgerRoles.canEditAnyTransaction(member.getRole())) {
-            throw new BusinessException(ErrorCode.FORBIDDEN);
+        LedgerMember member = requireActiveMemberForUpdate(ledger.getId(), userId);
+        LedgerTransaction transaction = requireTransactionForMutation(ledger.getId(), transactionUuid);
+        requireEditPermission(member, transaction, userId);
+        if (transaction.getDeletedAt() != null || !Objects.equals(transaction.getVersion(), req.getVersion())) {
+            throw transactionConflict(ledger, transaction, req.getVersion());
         }
-        requireCurrentVersion(transaction, req.getVersion());
 
-        transaction.setDeletedAt(LocalDateTime.now());
+        LocalDateTime updatedAt = LocalDateTime.now();
+        int nextVersion = req.getVersion() + 1;
+        int affected = baseMapper.update(null, Wrappers.<LedgerTransaction>lambdaUpdate()
+                .eq(LedgerTransaction::getId, transaction.getId())
+                .eq(LedgerTransaction::getVersion, req.getVersion())
+                .isNull(LedgerTransaction::getDeletedAt)
+                .set(LedgerTransaction::getDeletedAt, updatedAt)
+                .set(LedgerTransaction::getLastModifiedByUserId, userId)
+                .set(LedgerTransaction::getUpdatedAt, updatedAt)
+                .set(LedgerTransaction::getVersion, nextVersion));
+        if (affected == 0) {
+            LedgerTransaction latest = reloadTransactionForUpdate(transaction.getId(), transactionUuid);
+            requireEditPermission(member, latest, userId);
+            throw transactionConflict(ledger, latest, req.getVersion());
+        }
+        transaction.setDeletedAt(updatedAt);
         transaction.setLastModifiedByUserId(userId);
-        transaction.setVersion(transaction.getVersion() + 1);
-        updateById(transaction);
+        transaction.setUpdatedAt(updatedAt);
+        transaction.setVersion(nextVersion);
         changeLogService.record(ledger.getId(), "transaction", transaction.getUuid(), "delete", userId);
+        return new VersionMutationResp(transaction.getUuid(), nextVersion, true);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public TransactionResp restore(String ledgerUuid, String transactionUuid, TransactionUpdateReq req) {
+        Long userId = StpUtil.getLoginIdAsLong();
+        Ledger ledger = requireLedger(ledgerUuid);
+        LedgerMember member = requireActiveMemberForUpdate(ledger.getId(), userId);
+        LedgerTransaction transaction = requireTransactionForMutation(ledger.getId(), transactionUuid);
+        requireEditPermission(member, transaction, userId);
+        if (transaction.getDeletedAt() == null || !Objects.equals(transaction.getVersion(), req.getVersion())) {
+            throw transactionConflict(ledger, transaction, req.getVersion());
+        }
+        validateType(req.getType());
+        List<LedgerPerson> people = requirePeopleForUpdate(ledger.getId(), req.getPersonUuids());
+        LedgerPerson payer = resolvePayerForUpdate(ledger.getId(), req.getType(), req.getPayerPersonUuid());
+
+        Long payerPersonId = payer == null ? null : payer.getId();
+        String currencyCode = req.getCurrencyCode().trim().toUpperCase();
+        String category = req.getCategory().trim();
+        String note = normalize(req.getNote());
+        LocalDateTime updatedAt = LocalDateTime.now();
+        int nextVersion = req.getVersion() + 1;
+        int affected = baseMapper.update(null, Wrappers.<LedgerTransaction>lambdaUpdate()
+                .eq(LedgerTransaction::getId, transaction.getId())
+                .eq(LedgerTransaction::getVersion, req.getVersion())
+                .isNotNull(LedgerTransaction::getDeletedAt)
+                .set(LedgerTransaction::getType, req.getType())
+                .set(LedgerTransaction::getPayerPersonId, payerPersonId)
+                .set(LedgerTransaction::getAmount, req.getAmount())
+                .set(LedgerTransaction::getCurrencyCode, currencyCode)
+                .set(LedgerTransaction::getCategory, category)
+                .set(LedgerTransaction::getNote, note)
+                .set(LedgerTransaction::getHappenedAt, req.getHappenedAt())
+                .set(LedgerTransaction::getLastModifiedByUserId, userId)
+                .set(LedgerTransaction::getDeletedAt, null)
+                .set(LedgerTransaction::getUpdatedAt, updatedAt)
+                .set(LedgerTransaction::getVersion, nextVersion));
+        if (affected == 0) {
+            LedgerTransaction latest = reloadTransactionForUpdate(transaction.getId(), transactionUuid);
+            requireEditPermission(member, latest, userId);
+            throw transactionConflict(ledger, latest, req.getVersion());
+        }
+        applyUpdate(transaction, req, payerPersonId, userId, currencyCode, category, note, updatedAt, nextVersion);
+        transaction.setDeletedAt(null);
+        replacePeople(transaction.getId(), people);
+        changeLogService.record(ledger.getId(), "transaction", transaction.getUuid(), "update", userId);
+        return toCurrentResp(ledger, transaction, people);
     }
 
     private LedgerTransaction findByClientOperationId(Long ledgerId, Long userId, String clientOperationId) {
@@ -228,6 +314,19 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
         return member;
     }
 
+    private LedgerMember requireActiveMemberForUpdate(Long ledgerId, Long userId) {
+        LedgerMember member = ledgerMemberMapper.selectOne(Wrappers.<LedgerMember>lambdaQuery()
+                .eq(LedgerMember::getLedgerId, ledgerId)
+                .eq(LedgerMember::getUserId, userId)
+                .eq(LedgerMember::getStatus, MEMBER_STATUS_ACTIVE)
+                .isNull(LedgerMember::getDeletedAt)
+                .last("FOR UPDATE"));
+        if (member == null) {
+            throw new BusinessException(ErrorCode.FORBIDDEN);
+        }
+        return member;
+    }
+
     private LedgerTransaction requireTransaction(Long ledgerId, String transactionUuid) {
         LedgerTransaction transaction = lambdaQuery()
                 .eq(LedgerTransaction::getLedgerId, ledgerId)
@@ -238,6 +337,27 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
             throw new BusinessException(ErrorCode.NOT_FOUND, "流水不存在");
         }
         return transaction;
+    }
+
+    private LedgerTransaction requireTransactionForMutation(Long ledgerId, String transactionUuid) {
+        LedgerTransaction transaction = baseMapper.selectOne(Wrappers.<LedgerTransaction>lambdaQuery()
+                .eq(LedgerTransaction::getLedgerId, ledgerId)
+                .eq(LedgerTransaction::getUuid, transactionUuid)
+                .last("FOR UPDATE"));
+        if (transaction == null) {
+            throw new BusinessException(ErrorCode.NOT_FOUND, "流水不存在");
+        }
+        return transaction;
+    }
+
+    private LedgerTransaction reloadTransactionForUpdate(Long transactionId, String transactionUuid) {
+        LedgerTransaction latest = baseMapper.selectOne(Wrappers.<LedgerTransaction>lambdaQuery()
+                .eq(LedgerTransaction::getId, transactionId)
+                .last("FOR UPDATE"));
+        if (latest == null) {
+            throw new BusinessException(ErrorCode.NOT_FOUND, "流水不存在: " + transactionUuid);
+        }
+        return latest;
     }
 
     private LedgerPerson requirePerson(Long ledgerId, String personUuid, boolean includeDeleted) {
@@ -273,11 +393,50 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
         return people;
     }
 
+    private List<LedgerPerson> requirePeopleForUpdate(Long ledgerId, List<String> personUuids) {
+        List<String> uuids = normalizedPersonUuids(personUuids);
+        if (uuids.isEmpty()) {
+            throw new BusinessException(ErrorCode.BAD_REQUEST, "参与人不能为空");
+        }
+        List<LedgerPerson> people = ledgerPersonMapper.selectList(Wrappers.<LedgerPerson>lambdaQuery()
+                .eq(LedgerPerson::getLedgerId, ledgerId)
+                .in(LedgerPerson::getUuid, uuids)
+                .isNull(LedgerPerson::getDeletedAt)
+                .last("FOR UPDATE"));
+        if (people.size() != uuids.size()) {
+            throw new BusinessException(ErrorCode.BAD_REQUEST, "参与人不存在或已删除");
+        }
+        return people;
+    }
+
+    private List<String> normalizedPersonUuids(List<String> personUuids) {
+        return personUuids.stream()
+                .filter(StringUtils::hasText)
+                .map(String::trim)
+                .distinct()
+                .toList();
+    }
+
     private LedgerPerson resolvePayer(Long ledgerId, Integer type, String payerPersonUuid) {
         if (!Objects.equals(TYPE_EXPENSE, type) || !StringUtils.hasText(payerPersonUuid)) {
             return null;
         }
         return requirePerson(ledgerId, payerPersonUuid.trim(), false);
+    }
+
+    private LedgerPerson resolvePayerForUpdate(Long ledgerId, Integer type, String payerPersonUuid) {
+        if (!Objects.equals(TYPE_EXPENSE, type) || !StringUtils.hasText(payerPersonUuid)) {
+            return null;
+        }
+        LedgerPerson payer = ledgerPersonMapper.selectOne(Wrappers.<LedgerPerson>lambdaQuery()
+                .eq(LedgerPerson::getLedgerId, ledgerId)
+                .eq(LedgerPerson::getUuid, payerPersonUuid.trim())
+                .isNull(LedgerPerson::getDeletedAt)
+                .last("FOR UPDATE"));
+        if (payer == null) {
+            throw new BusinessException(ErrorCode.NOT_FOUND, "参与人不存在");
+        }
+        return payer;
     }
 
     private void replacePeople(Long transactionId, List<LedgerPerson> people) {
@@ -308,6 +467,22 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
             wrapper.isNull(LedgerPerson::getDeletedAt);
         }
         return ledgerPersonMapper.selectList(wrapper);
+    }
+
+    private List<LedgerPerson> currentPeopleByTransactionId(Long transactionId) {
+        List<Long> personIds = ledgerTransactionPersonMapper.selectList(
+                        Wrappers.<LedgerTransactionPerson>lambdaQuery()
+                                .eq(LedgerTransactionPerson::getTransactionId, transactionId)
+                                .last("FOR UPDATE"))
+                .stream()
+                .map(LedgerTransactionPerson::getPersonId)
+                .toList();
+        if (personIds.isEmpty()) {
+            return List.of();
+        }
+        return ledgerPersonMapper.selectList(Wrappers.<LedgerPerson>lambdaQuery()
+                .in(LedgerPerson::getId, personIds)
+                .last("FOR UPDATE"));
     }
 
     private Map<Long, List<LedgerPerson>> peopleMapByTransactionIds(List<Long> transactionIds) {
@@ -387,6 +562,15 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
         return resp;
     }
 
+    private TransactionResp toCurrentResp(
+            Ledger ledger,
+            LedgerTransaction transaction,
+            List<LedgerPerson> people
+    ) {
+        return toResp(ledger, transaction, people,
+                currentUserMap(List.of(transaction)), currentPayerPersonUuidMap(List.of(transaction)));
+    }
+
     private Map<Long, UserAccount> userMap(List<LedgerTransaction> transactions) {
         List<Long> userIds = transactions.stream()
                 .flatMap(transaction -> Stream.of(transaction.getCreatedByUserId(), transaction.getLastModifiedByUserId()))
@@ -397,6 +581,23 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
             return Map.of();
         }
         return userAccountMapper.selectList(Wrappers.<UserAccount>lambdaQuery().in(UserAccount::getId, userIds))
+                .stream()
+                .collect(Collectors.toMap(UserAccount::getId, Function.identity(), (a, b) -> a));
+    }
+
+    private Map<Long, UserAccount> currentUserMap(List<LedgerTransaction> transactions) {
+        List<Long> userIds = transactions.stream()
+                .flatMap(transaction -> Stream.of(
+                        transaction.getCreatedByUserId(), transaction.getLastModifiedByUserId()))
+                .filter(Objects::nonNull)
+                .distinct()
+                .toList();
+        if (userIds.isEmpty()) {
+            return Map.of();
+        }
+        return userAccountMapper.selectList(Wrappers.<UserAccount>lambdaQuery()
+                        .in(UserAccount::getId, userIds)
+                        .last("FOR UPDATE"))
                 .stream()
                 .collect(Collectors.toMap(UserAccount::getId, Function.identity(), (a, b) -> a));
     }
@@ -430,6 +631,22 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
                 .collect(Collectors.toMap(LedgerPerson::getId, LedgerPerson::getUuid, (a, b) -> a));
     }
 
+    private Map<Long, String> currentPayerPersonUuidMap(List<LedgerTransaction> transactions) {
+        List<Long> payerPersonIds = transactions.stream()
+                .map(LedgerTransaction::getPayerPersonId)
+                .filter(Objects::nonNull)
+                .distinct()
+                .toList();
+        if (payerPersonIds.isEmpty()) {
+            return Map.of();
+        }
+        return ledgerPersonMapper.selectList(Wrappers.<LedgerPerson>lambdaQuery()
+                        .in(LedgerPerson::getId, payerPersonIds)
+                        .last("FOR UPDATE"))
+                .stream()
+                .collect(Collectors.toMap(LedgerPerson::getId, LedgerPerson::getUuid, (a, b) -> a));
+    }
+
     private String payerPersonUuid(LedgerTransaction transaction, Map<Long, String> payerPersonUuidMap) {
         Long payerPersonId = transaction.getPayerPersonId();
         if (payerPersonId == null) {
@@ -448,10 +665,44 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
         throw new BusinessException(ErrorCode.FORBIDDEN);
     }
 
-    private void requireCurrentVersion(LedgerTransaction transaction, Integer version) {
-        if (!Objects.equals(transaction.getVersion(), version)) {
-            throw new BusinessException(ErrorCode.CONFLICT);
-        }
+    private void applyUpdate(
+            LedgerTransaction transaction,
+            TransactionUpdateReq req,
+            Long payerPersonId,
+            Long userId,
+            String currencyCode,
+            String category,
+            String note,
+            LocalDateTime updatedAt,
+            int nextVersion
+    ) {
+        transaction.setType(req.getType());
+        transaction.setPayerPersonId(payerPersonId);
+        transaction.setAmount(req.getAmount());
+        transaction.setCurrencyCode(currencyCode);
+        transaction.setCategory(category);
+        transaction.setNote(note);
+        transaction.setHappenedAt(req.getHappenedAt());
+        transaction.setLastModifiedByUserId(userId);
+        transaction.setUpdatedAt(updatedAt);
+        transaction.setVersion(nextVersion);
+    }
+
+    private VersionConflictException transactionConflict(
+            Ledger ledger,
+            LedgerTransaction transaction,
+            Integer submittedVersion
+    ) {
+        TransactionResp snapshot = toCurrentResp(
+                ledger, transaction, currentPeopleByTransactionId(transaction.getId()));
+        return new VersionConflictException(new ConflictResp(
+                "transaction",
+                transaction.getUuid(),
+                submittedVersion,
+                transaction.getVersion(),
+                transaction.getDeletedAt() != null,
+                snapshot
+        ));
     }
 
     private void validateType(Integer type) {
