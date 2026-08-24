@@ -12,6 +12,7 @@ public final class LedgerRoles {
     private static final Set<String> MANAGE_LEDGER_ROLES = Set.of(OWNER, ADMIN);
     private static final Set<String> EDIT_TRANSACTION_ROLES = Set.of(OWNER, ADMIN, EDITOR);
     private static final Set<String> JOINABLE_ROLES = Set.of(ADMIN, EDITOR, VIEWER);
+    private static final Set<String> MEMBER_ROLES = Set.of(OWNER, ADMIN, EDITOR, VIEWER);
 
     private LedgerRoles() {
     }
@@ -33,11 +34,12 @@ public final class LedgerRoles {
     }
 
     public static boolean isValidJoinableRole(String role) {
-        return JOINABLE_ROLES.contains(role);
+        return role != null && JOINABLE_ROLES.contains(role);
     }
 
     public static boolean canAssignRole(String operatorRole, String targetRole, String newRole) {
-        if (!isValidJoinableRole(newRole) || OWNER.equals(targetRole)) {
+        if (!isValidMemberRole(operatorRole) || !isValidMemberRole(targetRole)
+                || !isValidJoinableRole(newRole) || OWNER.equals(targetRole)) {
             return false;
         }
         if (OWNER.equals(operatorRole)) {
@@ -49,12 +51,24 @@ public final class LedgerRoles {
     }
 
     public static boolean canRemoveRole(String operatorRole, String targetRole) {
-        if (OWNER.equals(targetRole)) {
+        if (!isValidMemberRole(operatorRole) || !isValidMemberRole(targetRole) || OWNER.equals(targetRole)) {
             return false;
         }
         if (OWNER.equals(operatorRole)) {
             return true;
         }
         return ADMIN.equals(operatorRole) && (EDITOR.equals(targetRole) || VIEWER.equals(targetRole));
+    }
+
+    public static boolean canCreateInvite(String operatorRole, String invitedRole) {
+        if (!isValidMemberRole(operatorRole) || !isValidJoinableRole(invitedRole)) {
+            return false;
+        }
+        return OWNER.equals(operatorRole)
+                || ADMIN.equals(operatorRole) && (EDITOR.equals(invitedRole) || VIEWER.equals(invitedRole));
+    }
+
+    private static boolean isValidMemberRole(String role) {
+        return role != null && MEMBER_ROLES.contains(role);
     }
 }

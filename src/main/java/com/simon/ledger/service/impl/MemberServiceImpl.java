@@ -59,7 +59,7 @@ public class MemberServiceImpl extends ServiceImpl<LedgerMemberMapper, LedgerMem
     public MemberResp updateRole(String ledgerUuid, String memberUuid, MemberRoleUpdateReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
         Ledger ledger = requireLedger(ledgerUuid);
-        LedgerMember operator = requireActiveMember(ledger.getId(), userId);
+        LedgerMember operator = requireActiveMemberForUpdate(ledger.getId(), userId);
         requireManageMemberPermission(operator);
         LedgerMember target = requireMemberForMutation(ledger.getId(), memberUuid);
         String newRole = normalizeRole(req.getRole());
@@ -100,7 +100,7 @@ public class MemberServiceImpl extends ServiceImpl<LedgerMemberMapper, LedgerMem
     public VersionMutationResp remove(String ledgerUuid, String memberUuid, VersionDeleteReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
         Ledger ledger = requireLedger(ledgerUuid);
-        LedgerMember operator = requireActiveMember(ledger.getId(), userId);
+        LedgerMember operator = requireActiveMemberForUpdate(ledger.getId(), userId);
         requireManageMemberPermission(operator);
         LedgerMember target = requireMemberForMutation(ledger.getId(), memberUuid);
         requireRemoveRolePermission(operator.getRole(), target.getRole());
@@ -137,7 +137,7 @@ public class MemberServiceImpl extends ServiceImpl<LedgerMemberMapper, LedgerMem
     public MemberResp restore(String ledgerUuid, String memberUuid, MemberRoleUpdateReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
         Ledger ledger = requireLedger(ledgerUuid);
-        LedgerMember operator = requireActiveMember(ledger.getId(), userId);
+        LedgerMember operator = requireActiveMemberForUpdate(ledger.getId(), userId);
         requireManageMemberPermission(operator);
         LedgerMember target = requireMemberForMutation(ledger.getId(), memberUuid);
         String newRole = normalizeRole(req.getRole());
@@ -203,6 +203,19 @@ public class MemberServiceImpl extends ServiceImpl<LedgerMemberMapper, LedgerMem
                 .eq(LedgerMember::getUuid, memberUuid));
         if (member == null) {
             throw new BusinessException(ErrorCode.NOT_FOUND, "成员不存在");
+        }
+        return member;
+    }
+
+    private LedgerMember requireActiveMemberForUpdate(Long ledgerId, Long userId) {
+        LedgerMember member = baseMapper.selectOne(Wrappers.<LedgerMember>lambdaQuery()
+                .eq(LedgerMember::getLedgerId, ledgerId)
+                .eq(LedgerMember::getUserId, userId)
+                .eq(LedgerMember::getStatus, MEMBER_STATUS_ACTIVE)
+                .isNull(LedgerMember::getDeletedAt)
+                .last("FOR UPDATE"));
+        if (member == null) {
+            throw new BusinessException(ErrorCode.FORBIDDEN);
         }
         return member;
     }

@@ -2,6 +2,7 @@ package com.simon.ledger.service.impl;
 
 import cn.dev33.satoken.stp.StpUtil;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
+import com.baomidou.mybatisplus.core.conditions.AbstractWrapper;
 import com.baomidou.mybatisplus.core.conditions.Wrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
@@ -105,6 +106,7 @@ class MemberServiceConcurrencyTests {
         assertTrue(captor.getValue().getSqlSegment().contains("status"));
         assertTrue(captor.getValue().getSqlSet().contains("role"));
         assertTrue(captor.getValue().getSqlSet().contains("updated_at"));
+        assertOperatorReadLockedAndScoped();
         verify(memberMapper, never()).updateById(any(LedgerMember.class));
         verify(changeLogService).record(11L, "member", "member-uuid", "update", 7L);
     }
@@ -257,6 +259,7 @@ class MemberServiceConcurrencyTests {
         verify(memberMapper).update(isNull(), captor.capture());
         assertAtomicWrapper(captor.getValue(), "deleted_at IS NULL", 4, 5);
         assertTrue(captor.getValue().getSqlSet().contains("deleted_at"));
+        assertOperatorReadLockedAndScoped();
         verify(changeLogService).record(11L, "member", "member-uuid", "delete", 7L);
     }
 
@@ -277,6 +280,7 @@ class MemberServiceConcurrencyTests {
         assertAtomicWrapper(captor.getValue(), "deleted_at IS NOT NULL", 4, 5);
         assertTrue(captor.getValue().getSqlSet().contains("role"));
         assertTrue(captor.getValue().getSqlSet().contains("deleted_at"));
+        assertOperatorReadLockedAndScoped();
         verify(changeLogService).record(11L, "member", "member-uuid", "update", 7L);
     }
 
@@ -562,12 +566,34 @@ class MemberServiceConcurrencyTests {
     }
 
     private void assertAtomicWrapper(LambdaUpdateWrapper<?> wrapper, String deletedPredicate, int submitted, int next) {
-        assertTrue(wrapper.getSqlSegment().contains("id"));
-        assertTrue(wrapper.getSqlSegment().contains("version"));
+        String sql = wrapper.getSqlSegment();
+        assertTrue(sql.matches("(?s).*\\bid\\b\\s*=.*"));
+        assertTrue(sql.matches("(?s).*\\bversion\\b\\s*=.*"));
+        assertTrue(sql.matches("(?s).*\\bstatus\\b\\s*=.*"));
         assertTrue(wrapper.getSqlSegment().contains(deletedPredicate));
+        assertTrue(wrapper.getParamNameValuePairs().containsValue(22L));
         assertTrue(wrapper.getParamNameValuePairs().containsValue(submitted));
         assertTrue(wrapper.getParamNameValuePairs().containsValue(next));
+        assertTrue(wrapper.getParamNameValuePairs().containsValue(1));
         assertTrue(wrapper.getSqlSet().contains("version"));
+    }
+
+    private void assertOperatorReadLockedAndScoped() {
+        ArgumentCaptor<Wrapper<LedgerMember>> reads = memberWrapperCaptor();
+        org.mockito.InOrder order = org.mockito.Mockito.inOrder(memberMapper);
+        order.verify(memberMapper, org.mockito.Mockito.calls(1)).selectOne(reads.capture());
+        order.verify(memberMapper, org.mockito.Mockito.calls(1)).selectOne(reads.capture());
+        order.verify(memberMapper).update(isNull(), any());
+        AbstractWrapper<?, ?, ?> operatorRead = (AbstractWrapper<?, ?, ?>) reads.getAllValues().getFirst();
+        String sql = operatorRead.getSqlSegment();
+        assertTrue(sql.contains("ledger_id"));
+        assertTrue(sql.contains("user_id"));
+        assertTrue(sql.contains("status"));
+        assertTrue(sql.contains("deleted_at IS NULL"));
+        assertTrue(sql.contains("FOR UPDATE"));
+        assertTrue(operatorRead.getParamNameValuePairs().containsValue(11L));
+        assertTrue(operatorRead.getParamNameValuePairs().containsValue(7L));
+        assertTrue(operatorRead.getParamNameValuePairs().containsValue(1));
     }
 
     private void assertMemberConflict(VersionConflictException exception, int submitted, int remote,

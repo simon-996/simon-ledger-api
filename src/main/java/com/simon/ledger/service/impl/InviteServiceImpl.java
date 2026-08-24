@@ -9,10 +9,13 @@ import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.simon.ledger.common.ErrorCode;
 import com.simon.ledger.common.LedgerRoles;
 import com.simon.ledger.common.exception.BusinessException;
+import com.simon.ledger.common.exception.VersionConflictException;
 import com.simon.ledger.dto.req.InviteCreateReq;
 import com.simon.ledger.dto.req.InviteRegenerateReq;
+import com.simon.ledger.dto.resp.ConflictResp;
 import com.simon.ledger.dto.resp.InviteMemberSummaryResp;
 import com.simon.ledger.dto.resp.InviteResp;
+import com.simon.ledger.dto.resp.MemberResp;
 import com.simon.ledger.entity.Ledger;
 import com.simon.ledger.entity.LedgerInvite;
 import com.simon.ledger.entity.LedgerMember;
@@ -50,11 +53,12 @@ public class InviteServiceImpl extends ServiceImpl<LedgerInviteMapper, LedgerInv
     public InviteResp create(String ledgerUuid, InviteCreateReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
         Ledger ledger = requireLedger(ledgerUuid);
-        requireLedgerManager(ledger.getId(), userId);
+        LedgerMember operator = requireActiveMemberForUpdate(ledger.getId(), userId);
         String role = normalizeRole(req.getRole());
         if (!LedgerRoles.isValidJoinableRole(role)) {
             throw new BusinessException(ErrorCode.BAD_REQUEST, "邀请角色不正确");
         }
+        requireInvitePermission(operator, role);
         LocalDateTime now = LocalDateTime.now();
         disableUsableInvites(ledger.getId(), now);
         LedgerInvite invite = createInvite(ledger, userId, role, req.getMaxUses(), req.getExpiresAt(), now);
@@ -75,12 +79,13 @@ public class InviteServiceImpl extends ServiceImpl<LedgerInviteMapper, LedgerInv
     public InviteResp regenerate(String ledgerUuid, InviteRegenerateReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
         Ledger ledger = requireLedger(ledgerUuid);
-        requireLedgerManager(ledger.getId(), userId);
+        LedgerMember operator = requireActiveMemberForUpdate(ledger.getId(), userId);
         int days = requireAllowedDays(req.getDays());
         String role = normalizeRole(req.getRole());
         if (!LedgerRoles.isValidJoinableRole(role)) {
             throw new BusinessException(ErrorCode.BAD_REQUEST, "邀请角色不正确");
         }
+        requireInvitePermission(operator, role);
         LocalDateTime now = LocalDateTime.now();
         disableUsableInvites(ledger.getId(), now);
         LedgerInvite invite = createInvite(ledger, userId, role, req.getMaxUses(), now.plusDays(days), now);
@@ -128,11 +133,19 @@ public class InviteServiceImpl extends ServiceImpl<LedgerInviteMapper, LedgerInv
         if (ledger == null || ledger.getDeletedAt() != null) {
             throw new BusinessException(ErrorCode.NOT_FOUND, "账本不存在");
         }
+        String invitedRole = normalizeRole(invite.getRole());
+        if (!LedgerRoles.isValidJoinableRole(invitedRole)) {
+            throw new BusinessException(ErrorCode.BAD_REQUEST, "邀请角色不正确");
+        }
+        if (LedgerRoles.ADMIN.equals(invitedRole)) {
+            requireAdminInviteCreatedByCurrentOwner(ledger.getId(), invite.getCreatedByUserId());
+        }
 
         LedgerMember exists = ledgerMemberMapper.selectOne(Wrappers.<LedgerMember>lambdaQuery()
                 .eq(LedgerMember::getLedgerId, ledger.getId())
                 .eq(LedgerMember::getUserId, userId));
-        if (exists != null && exists.getDeletedAt() == null && MEMBER_STATUS_ACTIVE == exists.getStatus()) {
+        if (exists != null && exists.getDeletedAt() == null
+                && Integer.valueOf(MEMBER_STATUS_ACTIVE).equals(exists.getStatus())) {
             throw new BusinessException(ErrorCode.BAD_REQUEST, "已加入该账本");
         }
         if (exists == null) {
@@ -140,22 +153,89 @@ public class InviteServiceImpl extends ServiceImpl<LedgerInviteMapper, LedgerInv
             member.setUuid(IdUtil.fastSimpleUUID());
             member.setLedgerId(ledger.getId());
             member.setUserId(userId);
-            member.setRole(invite.getRole());
+            member.setRole(invitedRole);
             member.setStatus(MEMBER_STATUS_ACTIVE);
             member.setJoinedAt(LocalDateTime.now());
             ledgerMemberMapper.insert(member);
             changeLogService.record(ledger.getId(), "member", member.getUuid(), "create", userId);
         } else {
-            exists.setRole(invite.getRole());
-            exists.setStatus(MEMBER_STATUS_ACTIVE);
-            exists.setJoinedAt(LocalDateTime.now());
-            exists.setDeletedAt(null);
-            ledgerMemberMapper.updateById(exists);
-            changeLogService.record(ledger.getId(), "member", exists.getUuid(), "update", userId);
+            restoreExistingMember(ledger, exists, invitedRole, userId);
         }
 
         incrementInviteUsage(invite);
         return toResp(invite, ledger);
+    }
+
+    private void restoreExistingMember(Ledger ledger, LedgerMember observed, String invitedRole, Long userId) {
+        Integer observedVersion = observed.getVersion();
+        int nextVersion = observedVersion + 1;
+        LocalDateTime now = LocalDateTime.now();
+        LambdaUpdateWrapper<LedgerMember> wrapper = Wrappers.<LedgerMember>lambdaUpdate()
+                .eq(LedgerMember::getId, observed.getId())
+                .eq(LedgerMember::getVersion, observedVersion)
+                .and(condition -> condition
+                        .ne(LedgerMember::getStatus, MEMBER_STATUS_ACTIVE)
+                        .or()
+                        .isNotNull(LedgerMember::getDeletedAt))
+                .set(LedgerMember::getRole, invitedRole)
+                .set(LedgerMember::getStatus, MEMBER_STATUS_ACTIVE)
+                .set(LedgerMember::getJoinedAt, now)
+                .set(LedgerMember::getDeletedAt, null)
+                .set(LedgerMember::getUpdatedAt, now)
+                .set(LedgerMember::getVersion, nextVersion);
+        if (ledgerMemberMapper.update(null, wrapper) != 1) {
+            LedgerMember latest = ledgerMemberMapper.selectOne(Wrappers.<LedgerMember>lambdaQuery()
+                    .eq(LedgerMember::getId, observed.getId())
+                    .last("FOR UPDATE"));
+            throw memberConflict(observed, latest, observedVersion);
+        }
+
+        observed.setRole(invitedRole);
+        observed.setStatus(MEMBER_STATUS_ACTIVE);
+        observed.setJoinedAt(now);
+        observed.setDeletedAt(null);
+        observed.setUpdatedAt(now);
+        observed.setVersion(nextVersion);
+        changeLogService.record(ledger.getId(), "member", observed.getUuid(), "update", userId);
+    }
+
+    private VersionConflictException memberConflict(
+            LedgerMember observed,
+            LedgerMember latest,
+            Integer submittedVersion
+    ) {
+        if (latest == null) {
+            return new VersionConflictException(new ConflictResp(
+                    "member",
+                    observed.getUuid(),
+                    submittedVersion,
+                    null,
+                    true,
+                    null
+            ));
+        }
+        UserAccount user = userAccountMapper.selectById(latest.getUserId());
+        return new VersionConflictException(new ConflictResp(
+                "member",
+                latest.getUuid(),
+                submittedVersion,
+                latest.getVersion(),
+                latest.getDeletedAt() != null,
+                toMemberResp(latest, user)
+        ));
+    }
+
+    private MemberResp toMemberResp(LedgerMember member, UserAccount user) {
+        MemberResp resp = new MemberResp();
+        resp.setUuid(member.getUuid());
+        resp.setUserUuid(user == null ? null : user.getUuid());
+        resp.setNickname(user == null ? null : user.getNickname());
+        resp.setAvatar(user == null ? null : user.getAvatar());
+        resp.setRole(member.getRole());
+        resp.setStatus(member.getStatus());
+        resp.setJoinedAt(member.getJoinedAt());
+        resp.setVersion(member.getVersion());
+        return resp;
     }
 
     private void incrementInviteUsage(LedgerInvite invite) {
@@ -215,6 +295,40 @@ public class InviteServiceImpl extends ServiceImpl<LedgerInviteMapper, LedgerInv
         return member;
     }
 
+    private LedgerMember requireActiveMemberForUpdate(Long ledgerId, Long userId) {
+        LedgerMember member = ledgerMemberMapper.selectOne(Wrappers.<LedgerMember>lambdaQuery()
+                .eq(LedgerMember::getLedgerId, ledgerId)
+                .eq(LedgerMember::getUserId, userId)
+                .eq(LedgerMember::getStatus, MEMBER_STATUS_ACTIVE)
+                .isNull(LedgerMember::getDeletedAt)
+                .last("FOR UPDATE"));
+        if (member == null) {
+            throw new BusinessException(ErrorCode.FORBIDDEN);
+        }
+        return member;
+    }
+
+    private void requireInvitePermission(LedgerMember operator, String invitedRole) {
+        if (!LedgerRoles.canCreateInvite(operator.getRole(), invitedRole)) {
+            throw new BusinessException(ErrorCode.FORBIDDEN);
+        }
+    }
+
+    private void requireAdminInviteCreatedByCurrentOwner(Long ledgerId, Long createdByUserId) {
+        if (createdByUserId == null) {
+            throw new BusinessException(ErrorCode.FORBIDDEN);
+        }
+        LedgerMember creator = ledgerMemberMapper.selectOne(Wrappers.<LedgerMember>lambdaQuery()
+                .eq(LedgerMember::getLedgerId, ledgerId)
+                .eq(LedgerMember::getUserId, createdByUserId)
+                .eq(LedgerMember::getStatus, MEMBER_STATUS_ACTIVE)
+                .isNull(LedgerMember::getDeletedAt)
+                .last("FOR UPDATE"));
+        if (creator == null || !LedgerRoles.OWNER.equals(creator.getRole())) {
+            throw new BusinessException(ErrorCode.FORBIDDEN);
+        }
+    }
+
     private void requireLedgerManager(Long ledgerId, Long userId) {
         LedgerMember member = requireActiveMember(ledgerId, userId);
         if (!LedgerRoles.canManageLedger(member.getRole())) {
@@ -223,7 +337,8 @@ public class InviteServiceImpl extends ServiceImpl<LedgerInviteMapper, LedgerInv
     }
 
     private LedgerInvite requireInvite(String code) {
-        LedgerInvite invite = getOne(Wrappers.<LedgerInvite>lambdaQuery().eq(LedgerInvite::getCode, code));
+        LedgerInvite invite = baseMapper.selectOne(
+                Wrappers.<LedgerInvite>lambdaQuery().eq(LedgerInvite::getCode, code));
         if (invite == null) {
             throw new BusinessException(ErrorCode.NOT_FOUND, "邀请码不存在");
         }
@@ -297,7 +412,8 @@ public class InviteServiceImpl extends ServiceImpl<LedgerInviteMapper, LedgerInv
         String code;
         do {
             code = RandomUtil.randomStringUpper(8);
-        } while (lambdaQuery().eq(LedgerInvite::getCode, code).exists());
+        } while (baseMapper.selectCount(
+                Wrappers.<LedgerInvite>lambdaQuery().eq(LedgerInvite::getCode, code)) > 0);
         return code;
     }
 
