@@ -9,7 +9,9 @@ import com.simon.ledger.common.exception.BusinessException;
 import com.simon.ledger.common.exception.VersionConflictException;
 import com.simon.ledger.dto.resp.ConflictResp;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.core.LogEvent;
@@ -20,20 +22,31 @@ import org.apache.logging.log4j.core.layout.PatternLayout;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.http.MediaType;
+import org.springframework.validation.BeanPropertyBindingResult;
+import org.springframework.validation.BindException;
+import org.springframework.validation.FieldError;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.ModelAttribute;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import jakarta.validation.ConstraintViolationException;
 
+import java.time.LocalDate;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -109,6 +122,83 @@ class RestExceptionMvcBoundaryTests {
     }
 
     @Test
+    void postMissingRequestBodyIsSafeBadRequest() throws Exception {
+        assertSafeBadRequest(post("/parse-body").contentType(MediaType.APPLICATION_JSON));
+    }
+
+    @Test
+    void deleteMissingRequestBodyIsSafeBadRequest() throws Exception {
+        assertSafeBadRequest(delete("/parse-body").contentType(MediaType.APPLICATION_JSON));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"{\"amount\":", "not-json-secret"})
+    void malformedJsonIsSafeBadRequest(String json) throws Exception {
+        assertSafeBadRequest(post("/parse-body")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(json), "not-json-secret", "HttpMessageNotReadableException");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "{\"amount\":\"invalid-number-secret\",\"date\":\"2026-01-01\",\"role\":\"OWNER\"}",
+            "{\"amount\":1,\"date\":\"invalid-date-secret\",\"role\":\"OWNER\"}",
+            "{\"amount\":1,\"date\":\"2026-01-01\",\"role\":\"invalid-role-secret\"}"
+    })
+    void invalidJsonFieldTypeIsSafeBadRequest(String json) throws Exception {
+        assertSafeBadRequest(post("/parse-body")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(json), "secret", "HttpMessageNotReadableException");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "amount=invalid-number-secret&date=2026-01-01&role=OWNER",
+            "amount=1&date=invalid-date-secret&role=OWNER",
+            "amount=1&date=2026-01-01&role=invalid-role-secret"
+    })
+    void invalidRequestParameterTypeIsSafeBadRequest(String query) throws Exception {
+        assertSafeBadRequest(get("/typed-params?" + query), "secret", "MethodArgumentTypeMismatchException");
+    }
+
+    @Test
+    void modelBindingTypeErrorIsSafeBadRequest() throws Exception {
+        assertSafeBadRequest(get("/bind?amount=invalid-binding-secret"),
+                "invalid-binding-secret", "BindException");
+    }
+
+    @Test
+    void bindExceptionIsSafeBadRequest() throws Exception {
+        assertSafeBadRequest(get("/bind-exception"), "invalid-binding-secret", "BindException");
+    }
+
+    @Test
+    void missingRequiredRequestParameterIsSafeBadRequest() throws Exception {
+        assertSafeBadRequest(get("/required-param"), "MissingServletRequestParameterException");
+    }
+
+    @Test
+    void handlerMethodInputValidationIsSafeBadRequest() throws Exception {
+        assertSafeBadRequest(get("/method-validation?amount=0"), "HandlerMethodValidationException");
+    }
+
+    @Test
+    void handlerMethodReturnValidationRemainsASystemError() throws Exception {
+        mvc.perform(get("/invalid-return"))
+                .andExpect(status().isInternalServerError())
+                .andExpect(jsonPath("$.code").value(500001))
+                .andExpect(jsonPath("$.message").value(ErrorCode.SYSTEM_ERROR.getMessage()));
+    }
+
+    @Test
+    void missingPathVariableFromControllerBugRemainsASystemError() throws Exception {
+        mvc.perform(get("/misconfigured-path/value"))
+                .andExpect(status().isInternalServerError())
+                .andExpect(jsonPath("$.code").value(500001))
+                .andExpect(jsonPath("$.message").value(ErrorCode.SYSTEM_ERROR.getMessage()));
+    }
+
+    @Test
     void allExceptionClassesCrossRealMvcBoundary() throws Exception {
         assertStatus("/bad-request", 400, 400001);
         assertStatus("/unauthorized", 401, 401001);
@@ -125,6 +215,27 @@ class RestExceptionMvcBoundaryTests {
 
     private void assertStatus(String path, int status, int code) throws Exception {
         mvc.perform(get(path)).andExpect(status().is(status)).andExpect(jsonPath("$.code").value(code));
+    }
+
+    private void assertSafeBadRequest(org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder request,
+                                      String... forbiddenFragments) throws Exception {
+        int eventStart = appender.events.size();
+        var result = mvc.perform(request)
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value(400001))
+                .andExpect(jsonPath("$.message").value(ErrorCode.BAD_REQUEST.getMessage()))
+                .andReturn();
+        String responseBody = result.getResponse().getContentAsString();
+        List<LogEvent> requestEvents = appender.events.subList(eventStart, appender.events.size());
+        String renderedLogs = requestEvents.stream()
+                .map(event -> PatternLayout.createDefaultLayout().toSerializable(event))
+                .reduce("", (all, next) -> all + next);
+        assertTrue(requestEvents.stream().noneMatch(event -> event.getLevel().isMoreSpecificThan(Level.ERROR)));
+        for (String fragment : forbiddenFragments) {
+            assertFalse(responseBody.contains(fragment));
+            assertFalse(renderedLogs.contains(fragment));
+        }
+        assertFalse(responseBody.contains("500001"));
     }
 
     @RestController
@@ -169,6 +280,68 @@ class RestExceptionMvcBoundaryTests {
 
         @PostMapping("/validate")
         void validate(@Valid @RequestBody Payload payload) {
+        }
+
+        @PostMapping("/parse-body")
+        void parsePost(@RequestBody ParsePayload payload) {
+        }
+
+        @DeleteMapping("/parse-body")
+        void parseDelete(@RequestBody ParsePayload payload) {
+        }
+
+        @GetMapping("/typed-params")
+        void typedParams(@RequestParam int amount, @RequestParam LocalDate date, @RequestParam Role role) {
+        }
+
+        @GetMapping("/bind")
+        void bind(@ModelAttribute BindingPayload payload) {
+        }
+
+        @GetMapping("/bind-exception")
+        void bindException() throws BindException {
+            var binding = new BeanPropertyBindingResult(new Object(), "target");
+            binding.addError(new FieldError("target", "amount", "invalid-binding-secret", true,
+                    null, null, "conversion exception secret"));
+            throw new BindException(binding);
+        }
+
+        @GetMapping("/required-param")
+        void requiredParam(@RequestParam String required) {
+        }
+
+        @GetMapping("/method-validation")
+        void methodValidation(@RequestParam @Min(1) int amount) {
+        }
+
+
+        @GetMapping("/invalid-return")
+        @NotNull
+        String invalidReturn() {
+            return null;
+        }
+
+        @GetMapping("/misconfigured-path/{id}")
+        void misconfiguredPath(@PathVariable("other") String value) {
+        }
+    }
+
+    record ParsePayload(int amount, LocalDate date, Role role) {
+    }
+
+    enum Role {
+        OWNER
+    }
+
+    static class BindingPayload {
+        private int amount;
+
+        public int getAmount() {
+            return amount;
+        }
+
+        public void setAmount(int amount) {
+            this.amount = amount;
         }
     }
 

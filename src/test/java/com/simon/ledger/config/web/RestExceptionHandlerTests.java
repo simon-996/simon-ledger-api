@@ -64,9 +64,23 @@ class RestExceptionHandlerTests {
         var binding = new BeanPropertyBindingResult(target, "target");
         binding.addError(new FieldError("target", "name", "name required"));
         var validation = new MethodArgumentNotValidException(null, binding);
-        assertHttpStatus(() -> handler.methodArgumentNotValidExceptionHandler(validation), 400);
-        assertHttpStatus(() -> handler.constraintViolationExceptionHandler(
-                new ConstraintViolationException("invalid", Collections.emptySet())), 400);
+        assertBadRequestMessage(handler.methodArgumentNotValidExceptionHandler(validation), "name required");
+        assertBadRequestMessage(handler.constraintViolationExceptionHandler(
+                new ConstraintViolationException("invalid", Collections.emptySet())), "invalid");
+    }
+
+    @Test
+    void bindingFailureDoesNotExposeRejectedValueOrConversionDetails() {
+        var binding = new BeanPropertyBindingResult(new Object(), "target");
+        binding.addError(new FieldError("target", "amount", "invalid-binding-secret", true,
+                null, null, "conversion exception secret"));
+
+        ResponseEntity<Result<?>> response = handler.methodArgumentNotValidExceptionHandler(
+                new MethodArgumentNotValidException(null, binding));
+
+        assertBadRequestMessage(response, ErrorCode.BAD_REQUEST.getMessage());
+        assertFalse(response.getBody().getMessage().contains("invalid-binding-secret"));
+        assertFalse(response.getBody().getMessage().contains("conversion exception secret"));
     }
 
     @Test
@@ -92,6 +106,13 @@ class RestExceptionHandlerTests {
         Object response = assertDoesNotThrow(supplier::get);
         assertTrue(response instanceof ResponseEntity<?>);
         assertEquals(status, ((ResponseEntity<?>) response).getStatusCode().value());
+    }
+
+    private void assertBadRequestMessage(ResponseEntity<Result<?>> response, String message) {
+        assertEquals(HttpStatus.BAD_REQUEST, response.getStatusCode());
+        assertNotNull(response.getBody());
+        assertEquals(ErrorCode.BAD_REQUEST.getCode(), response.getBody().getCode());
+        assertEquals(message, response.getBody().getMessage());
     }
 
     @FunctionalInterface

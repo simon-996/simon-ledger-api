@@ -8,11 +8,19 @@ import com.simon.ledger.common.Result;
 import com.simon.ledger.common.exception.BusinessException;
 import jakarta.validation.ConstraintViolationException;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.validation.BindException;
+import org.springframework.validation.FieldError;
+import org.springframework.web.bind.MissingMatrixVariableException;
+import org.springframework.web.bind.MissingPathVariableException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.ServletRequestBindingException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.method.annotation.HandlerMethodValidationException;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 
 import java.util.UUID;
 
@@ -43,11 +51,37 @@ public class RestExceptionHandler {
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public ResponseEntity<Result<?>> methodArgumentNotValidExceptionHandler(MethodArgumentNotValidException e) {
+        if (e.getBindingResult().getFieldErrors().stream().anyMatch(FieldError::isBindingFailure)) {
+            return badRequest();
+        }
         String message = ErrorCode.BAD_REQUEST.getMessage();
         if (!e.getBindingResult().getAllErrors().isEmpty()) {
             message = e.getBindingResult().getAllErrors().getFirst().getDefaultMessage();
         }
         return response(ErrorCode.BAD_REQUEST, message, null);
+    }
+
+    @ExceptionHandler({HttpMessageNotReadableException.class,
+            MethodArgumentTypeMismatchException.class,
+            BindException.class})
+    public ResponseEntity<Result<?>> requestInputExceptionHandler(Exception e) {
+        return badRequest();
+    }
+
+    @ExceptionHandler(ServletRequestBindingException.class)
+    public ResponseEntity<Result<?>> servletRequestBindingExceptionHandler(ServletRequestBindingException e) {
+        if (e instanceof MissingPathVariableException || e instanceof MissingMatrixVariableException) {
+            return exceptionHandler(e);
+        }
+        return badRequest();
+    }
+
+    @ExceptionHandler(HandlerMethodValidationException.class)
+    public ResponseEntity<Result<?>> handlerMethodValidationExceptionHandler(HandlerMethodValidationException e) {
+        if (e.isForReturnValue()) {
+            return exceptionHandler(e);
+        }
+        return badRequest();
     }
 
     @ExceptionHandler(ConstraintViolationException.class)
@@ -68,6 +102,10 @@ public class RestExceptionHandler {
     private ResponseEntity<Result<?>> response(ErrorCode errorCode, String message, Object data) {
         Result<?> result = Result.fail(errorCode, message, data);
         return ResponseEntity.status(httpStatus(errorCode)).body(result);
+    }
+
+    private ResponseEntity<Result<?>> badRequest() {
+        return response(ErrorCode.BAD_REQUEST, ErrorCode.BAD_REQUEST.getMessage(), null);
     }
 
     private HttpStatus httpStatus(ErrorCode errorCode) {
