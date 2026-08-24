@@ -122,8 +122,8 @@ public class PersonServiceImpl extends ServiceImpl<LedgerPersonMapper, LedgerPer
     @Transactional(isolation = Isolation.READ_COMMITTED, rollbackFor = Exception.class)
     public PersonResp create(String ledgerUuid, PersonCreateReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
-        Ledger ledger = requireLedger(ledgerUuid);
-        LedgerMember member = requireActiveMember(ledger.getId(), userId);
+        Ledger ledger = requireActiveLedgerForMutation(ledgerUuid);
+        LedgerMember member = requireActiveMemberForUpdate(ledger.getId(), userId);
         requireManagePeoplePermission(member);
 
         UserAccount linkedUser = lockRequestedLinkedUser(req.getLinkedUserUuid());
@@ -150,7 +150,7 @@ public class PersonServiceImpl extends ServiceImpl<LedgerPersonMapper, LedgerPer
     @Transactional(isolation = Isolation.READ_COMMITTED, rollbackFor = Exception.class)
     public PersonResp update(String ledgerUuid, String personUuid, PersonUpdateReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
-        Ledger ledger = requireLedger(ledgerUuid);
+        Ledger ledger = requireActiveLedgerForMutation(ledgerUuid);
         LedgerMember member = requireActiveMemberForUpdate(ledger.getId(), userId);
         requireManagePeoplePermission(member);
         UserAccount linkedUser = lockRequestedLinkedUser(req.getLinkedUserUuid());
@@ -198,7 +198,7 @@ public class PersonServiceImpl extends ServiceImpl<LedgerPersonMapper, LedgerPer
     @Transactional(isolation = Isolation.READ_COMMITTED, rollbackFor = Exception.class)
     public VersionMutationResp delete(String ledgerUuid, String personUuid, VersionDeleteReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
-        Ledger ledger = requireLedger(ledgerUuid);
+        Ledger ledger = requireActiveLedgerForMutation(ledgerUuid);
         LedgerMember member = requireActiveMemberForUpdate(ledger.getId(), userId);
         requireManagePeoplePermission(member);
         LedgerPerson person = requirePersonForMutation(ledger.getId(), personUuid);
@@ -230,7 +230,7 @@ public class PersonServiceImpl extends ServiceImpl<LedgerPersonMapper, LedgerPer
     @Transactional(isolation = Isolation.READ_COMMITTED, rollbackFor = Exception.class)
     public PersonResp restore(String ledgerUuid, String personUuid, PersonUpdateReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
-        Ledger ledger = requireLedger(ledgerUuid);
+        Ledger ledger = requireActiveLedgerForMutation(ledgerUuid);
         LedgerMember member = requireActiveMemberForUpdate(ledger.getId(), userId);
         requireManagePeoplePermission(member);
         UserAccount linkedUser = lockRequestedLinkedUser(req.getLinkedUserUuid());
@@ -285,6 +285,17 @@ public class PersonServiceImpl extends ServiceImpl<LedgerPersonMapper, LedgerPer
         return ledger;
     }
 
+    private Ledger requireActiveLedgerForMutation(String ledgerUuid) {
+        Ledger ledger = ledgerMapper.selectOne(Wrappers.<Ledger>lambdaQuery()
+                .eq(Ledger::getUuid, ledgerUuid)
+                .isNull(Ledger::getDeletedAt)
+                .last("FOR UPDATE"));
+        if (ledger == null) {
+            throw new BusinessException(ErrorCode.NOT_FOUND, "账本不存在");
+        }
+        return ledger;
+    }
+
     private List<String> parseLedgerUuids(String ledgerUuids) {
         if (!StringUtils.hasText(ledgerUuids)) {
             return List.of();
@@ -325,7 +336,8 @@ public class PersonServiceImpl extends ServiceImpl<LedgerPersonMapper, LedgerPer
     private LedgerPerson requirePersonForMutation(Long ledgerId, String personUuid) {
         LedgerPerson person = baseMapper.selectOne(Wrappers.<LedgerPerson>lambdaQuery()
                 .eq(LedgerPerson::getLedgerId, ledgerId)
-                .eq(LedgerPerson::getUuid, personUuid));
+                .eq(LedgerPerson::getUuid, personUuid)
+                .last("FOR UPDATE"));
         if (person == null) {
             throw new BusinessException(ErrorCode.NOT_FOUND, "参与人不存在");
         }

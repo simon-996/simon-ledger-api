@@ -374,6 +374,22 @@ class TransactionServiceConcurrencyTests {
     }
 
     @Test
+    void deletedLedgerStopsTransactionMutationBeforeOperatorTargetWriteAndLog() {
+        when(ledgerMapper.selectOne(any())).thenReturn(null);
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> loggedIn(() -> service.create(
+                        "ledger-uuid", createReq("new-operation", null, List.of("person-a")))));
+
+        assertEquals(ErrorCode.NOT_FOUND, exception.getErrorCode());
+        verify(memberMapper, never()).selectOne(any());
+        verify(transactionMapper, never()).selectOne(any());
+        verify(transactionMapper, never()).insert(any(LedgerTransaction.class));
+        verify(relationMapper, never()).insert(any(LedgerTransactionPerson.class));
+        verify(changeLogService, never()).record(any(), any(), any(), any(), any());
+    }
+
+    @Test
     void staleUpdateReturnsCompleteSafeSnapshotBeforePayerAndPeopleValidation() {
         LedgerTransaction target = transaction(31L, "transaction-uuid", 8L, 5, null);
         target.setPayerPersonId(42L);
@@ -749,6 +765,19 @@ class TransactionServiceConcurrencyTests {
         assertTrue(wrapper.getParamNameValuePairs().containsValue(11L));
         assertTrue(wrapper.getParamNameValuePairs().containsValue(7L));
         assertTrue(wrapper.getParamNameValuePairs().containsValue(1));
+
+        ArgumentCaptor<Wrapper<Ledger>> ledgerRead = ledgerWrapperCaptor();
+        ArgumentCaptor<Wrapper<LedgerMember>> orderedOperatorRead = memberWrapperCaptor();
+        ArgumentCaptor<Wrapper<LedgerTransaction>> targetRead = transactionWrapperCaptor();
+        InOrder order = inOrder(ledgerMapper, memberMapper, transactionMapper);
+        order.verify(ledgerMapper).selectOne(ledgerRead.capture());
+        order.verify(memberMapper).selectOne(orderedOperatorRead.capture());
+        order.verify(transactionMapper).selectOne(targetRead.capture());
+        String ledgerSql = ((AbstractWrapper<?, ?, ?>) ledgerRead.getValue()).getSqlSegment();
+        assertTrue(ledgerSql.matches("(?s).*\\buuid\\b\\s*=.*"));
+        assertTrue(ledgerSql.contains("deleted_at IS NULL"));
+        assertTrue(ledgerSql.contains("FOR UPDATE"));
+        assertTrue(((AbstractWrapper<?, ?, ?>) targetRead.getValue()).getSqlSegment().contains("FOR UPDATE"));
     }
 
     private Ledger ledger() {
@@ -859,6 +888,11 @@ class TransactionServiceConcurrencyTests {
 
     @SuppressWarnings({"unchecked", "rawtypes"})
     private ArgumentCaptor<Wrapper<UserAccount>> userWrapperCaptor() {
+        return (ArgumentCaptor) ArgumentCaptor.forClass(Wrapper.class);
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private ArgumentCaptor<Wrapper<Ledger>> ledgerWrapperCaptor() {
         return (ArgumentCaptor) ArgumentCaptor.forClass(Wrapper.class);
     }
 

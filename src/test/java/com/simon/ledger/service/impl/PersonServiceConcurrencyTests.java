@@ -134,7 +134,32 @@ class PersonServiceConcurrencyTests {
         order.verify(personMapper).selectOne(any());
         order.verify(personMapper).insert(any(LedgerPerson.class));
         assertRequestedLinkedUserLock(requestedUserRead.getValue(), "linked-user");
+        assertLedgerLockedBeforeOperator();
         verify(changeLogService).record(eq(11L), eq("person"), any(), eq("create"), eq(7L));
+    }
+
+    @Test
+    void secondCreateSeesDuplicateCommittedAfterLedgerLockWaitAndRejectsWithoutWriting() {
+        stubLedgerAndOperator(LedgerRoles.OWNER);
+        LedgerPerson committedDuplicate = person(33L, "first-person", null, "Duplicate", 1, null);
+        when(personMapper.selectOne(any())).thenReturn(null, committedDuplicate);
+        when(personMapper.insert(any(LedgerPerson.class))).thenReturn(1);
+
+        loggedIn(() -> service.create("ledger-uuid", createReq("Duplicate", "", null)));
+        BusinessException duplicate = assertThrows(BusinessException.class,
+                () -> loggedIn(() -> service.create("ledger-uuid", createReq("Duplicate", "", null))));
+
+        assertEquals(ErrorCode.BAD_REQUEST, duplicate.getErrorCode());
+        verify(ledgerMapper, times(2)).selectOne(any());
+        verify(personMapper, times(1)).insert(any(LedgerPerson.class));
+        verify(changeLogService, times(1)).record(eq(11L), eq("person"), any(), eq("create"), eq(7L));
+        ArgumentCaptor<Wrapper<Ledger>> ledgerReads = ledgerWrapperCaptor();
+        verify(ledgerMapper, times(2)).selectOne(ledgerReads.capture());
+        for (Wrapper<Ledger> read : ledgerReads.getAllValues()) {
+            String sql = ((AbstractWrapper<?, ?, ?>) read).getSqlSegment();
+            assertTrue(sql.contains("deleted_at IS NULL"));
+            assertTrue(sql.contains("FOR UPDATE"));
+        }
     }
 
     @Test
@@ -217,6 +242,21 @@ class PersonServiceConcurrencyTests {
 
         assertEquals(ErrorCode.FORBIDDEN, exception.getErrorCode());
         verify(personMapper, never()).selectOne(any());
+        verify(changeLogService, never()).record(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void deletedLedgerStopsPersonMutationBeforeOperatorTargetWriteAndLog() {
+        when(ledgerMapper.selectOne(any())).thenReturn(null);
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> loggedIn(() -> service.create(
+                        "ledger-uuid", createReq("Name", "", null))));
+
+        assertEquals(ErrorCode.NOT_FOUND, exception.getErrorCode());
+        verify(memberMapper, never()).selectOne(any());
+        verify(personMapper, never()).selectOne(any());
+        verify(personMapper, never()).insert(any(LedgerPerson.class));
         verify(changeLogService, never()).record(any(), any(), any(), any(), any());
     }
 
@@ -524,6 +564,19 @@ class PersonServiceConcurrencyTests {
         assertTrue(wrapper.getParamNameValuePairs().containsValue(11L));
         assertTrue(wrapper.getParamNameValuePairs().containsValue(7L));
         assertTrue(wrapper.getParamNameValuePairs().containsValue(1));
+        assertLedgerLockedBeforeOperator();
+    }
+
+    private void assertLedgerLockedBeforeOperator() {
+        ArgumentCaptor<Wrapper<Ledger>> ledgerRead = ledgerWrapperCaptor();
+        ArgumentCaptor<Wrapper<LedgerMember>> operatorRead = memberWrapperCaptor();
+        InOrder order = inOrder(ledgerMapper, memberMapper);
+        order.verify(ledgerMapper).selectOne(ledgerRead.capture());
+        order.verify(memberMapper).selectOne(operatorRead.capture());
+        String sql = ((AbstractWrapper<?, ?, ?>) ledgerRead.getValue()).getSqlSegment();
+        assertTrue(sql.matches("(?s).*\\buuid\\b\\s*=.*"));
+        assertTrue(sql.contains("deleted_at IS NULL"));
+        assertTrue(sql.contains("FOR UPDATE"));
     }
 
     private void assertUniquenessReadExcludesCurrentPerson(Wrapper<LedgerPerson> read) {
@@ -711,6 +764,11 @@ class PersonServiceConcurrencyTests {
 
     @SuppressWarnings({"unchecked", "rawtypes"})
     private ArgumentCaptor<Wrapper<UserAccount>> userWrapperCaptor() {
+        return (ArgumentCaptor) ArgumentCaptor.forClass(Wrapper.class);
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private ArgumentCaptor<Wrapper<Ledger>> ledgerWrapperCaptor() {
         return (ArgumentCaptor) ArgumentCaptor.forClass(Wrapper.class);
     }
 

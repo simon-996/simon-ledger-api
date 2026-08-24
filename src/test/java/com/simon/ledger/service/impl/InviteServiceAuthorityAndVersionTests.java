@@ -107,6 +107,58 @@ class InviteServiceAuthorityAndVersionTests {
     }
 
     @Test
+    void joinLocatesTokenThenLocksActiveLedgerAndReloadsInviteBeforeMemberTarget() {
+        LedgerInvite located = invite(LedgerRoles.VIEWER, 9L);
+        LedgerMember existing = member(22L, "existing-member", 7L, LedgerRoles.VIEWER, 3, null);
+        when(inviteMapper.selectOne(any())).thenReturn(located, located);
+        when(ledgerMapper.selectOne(any())).thenReturn(ledger());
+        when(memberMapper.selectOne(any())).thenReturn(existing);
+
+        BusinessException alreadyJoined = assertThrows(BusinessException.class,
+                () -> loggedIn(() -> service.join("INVITE01")));
+
+        assertEquals(ErrorCode.BAD_REQUEST, alreadyJoined.getErrorCode());
+        ArgumentCaptor<Wrapper<LedgerInvite>> initialInviteRead = inviteWrapperCaptor();
+        ArgumentCaptor<Wrapper<Ledger>> ledgerRead = ledgerWrapperCaptor();
+        ArgumentCaptor<Wrapper<LedgerInvite>> lockedInviteRead = inviteWrapperCaptor();
+        ArgumentCaptor<Wrapper<LedgerMember>> memberRead = memberWrapperCaptor();
+        org.mockito.InOrder order = inOrder(inviteMapper, ledgerMapper, memberMapper);
+        order.verify(inviteMapper).selectOne(initialInviteRead.capture());
+        order.verify(ledgerMapper).selectOne(ledgerRead.capture());
+        order.verify(inviteMapper).selectOne(lockedInviteRead.capture());
+        order.verify(memberMapper).selectOne(memberRead.capture());
+        assertFalse(((AbstractWrapper<?, ?, ?>) initialInviteRead.getValue()).getSqlSegment().contains("FOR UPDATE"));
+        String ledgerSql = ((AbstractWrapper<?, ?, ?>) ledgerRead.getValue()).getSqlSegment();
+        assertTrue(ledgerSql.contains("id"));
+        assertTrue(ledgerSql.contains("deleted_at IS NULL"));
+        assertTrue(ledgerSql.contains("FOR UPDATE"));
+        assertTrue(((AbstractWrapper<?, ?, ?>) lockedInviteRead.getValue()).getSqlSegment().contains("FOR UPDATE"));
+        assertTrue(((AbstractWrapper<?, ?, ?>) memberRead.getValue()).getSqlSegment().contains("FOR UPDATE"));
+        verify(changeLogService, never()).record(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void deletedLedgerStopsInviteMutationsBeforeOperatorInviteMemberAndLog() {
+        when(ledgerMapper.selectOne(any())).thenReturn(null);
+        BusinessException createFailure = assertThrows(BusinessException.class,
+                () -> loggedIn(() -> service.create("ledger-uuid", createReq(LedgerRoles.VIEWER))));
+        assertEquals(ErrorCode.NOT_FOUND, createFailure.getErrorCode());
+        verify(memberMapper, never()).selectOne(any());
+        verify(inviteMapper, never()).insert(any(LedgerInvite.class));
+        verify(inviteMapper, never()).update(any(), any());
+
+        org.mockito.Mockito.reset(inviteMapper, ledgerMapper, memberMapper, userMapper, changeLogService);
+        when(inviteMapper.selectOne(any())).thenReturn(invite(LedgerRoles.VIEWER, 9L));
+        when(ledgerMapper.selectOne(any())).thenReturn(null);
+        BusinessException joinFailure = assertThrows(BusinessException.class,
+                () -> loggedIn(() -> service.join("INVITE01")));
+        assertEquals(ErrorCode.NOT_FOUND, joinFailure.getErrorCode());
+        verify(inviteMapper, org.mockito.Mockito.times(1)).selectOne(any());
+        verify(memberMapper, never()).selectOne(any());
+        verify(changeLogService, never()).record(any(), any(), any(), any(), any());
+    }
+
+    @Test
     void adminCannotCreateAdminInviteBeforeAnyInviteMutation() {
         stubLedgerAndOperator(LedgerRoles.ADMIN);
 
@@ -137,8 +189,8 @@ class InviteServiceAuthorityAndVersionTests {
     @Test
     void legacyAdminInviteCreatedByNonOwnerIsForbiddenBeforeMemberOrUsageMutation() {
         LedgerInvite invite = invite(LedgerRoles.ADMIN, 9L);
-        when(inviteMapper.selectOne(any())).thenReturn(invite);
-        when(ledgerMapper.selectById(11L)).thenReturn(ledger());
+        when(inviteMapper.selectOne(any())).thenReturn(invite, invite);
+        when(ledgerMapper.selectOne(any())).thenReturn(ledger());
         when(memberMapper.selectOne(any())).thenReturn(member(31L, "creator-member", 9L, LedgerRoles.ADMIN, 1, null));
 
         BusinessException exception = assertThrows(BusinessException.class,
@@ -156,8 +208,8 @@ class InviteServiceAuthorityAndVersionTests {
     @Test
     void invalidLegacyInviteRoleIsRejectedBeforeMemberOrUsageMutation() {
         LedgerInvite invite = invite("invalid", 7L);
-        when(inviteMapper.selectOne(any())).thenReturn(invite);
-        when(ledgerMapper.selectById(11L)).thenReturn(ledger());
+        when(inviteMapper.selectOne(any())).thenReturn(invite, invite);
+        when(ledgerMapper.selectOne(any())).thenReturn(ledger());
 
         BusinessException exception = assertThrows(BusinessException.class,
                 () -> loggedIn(() -> service.join("INVITE01")));
@@ -267,8 +319,9 @@ class InviteServiceAuthorityAndVersionTests {
     }
 
     private void stubExistingMemberJoin(LedgerMember existing) {
-        when(inviteMapper.selectOne(any())).thenReturn(invite(LedgerRoles.VIEWER, 9L));
-        when(ledgerMapper.selectById(11L)).thenReturn(ledger());
+        LedgerInvite invite = invite(LedgerRoles.VIEWER, 9L);
+        when(inviteMapper.selectOne(any())).thenReturn(invite, invite);
+        when(ledgerMapper.selectOne(any())).thenReturn(ledger());
         when(memberMapper.selectOne(any())).thenReturn(existing);
     }
 
@@ -319,6 +372,16 @@ class InviteServiceAuthorityAndVersionTests {
         assertTrue(wrapper.getParamNameValuePairs().containsValue(11L));
         assertTrue(wrapper.getParamNameValuePairs().containsValue(7L));
         assertTrue(wrapper.getParamNameValuePairs().containsValue(1));
+
+        ArgumentCaptor<Wrapper<Ledger>> ledgerRead = ledgerWrapperCaptor();
+        ArgumentCaptor<Wrapper<LedgerMember>> orderedOperatorRead = memberWrapperCaptor();
+        org.mockito.InOrder order = inOrder(ledgerMapper, memberMapper);
+        order.verify(ledgerMapper).selectOne(ledgerRead.capture());
+        order.verify(memberMapper).selectOne(orderedOperatorRead.capture());
+        String ledgerSql = ((AbstractWrapper<?, ?, ?>) ledgerRead.getValue()).getSqlSegment();
+        assertTrue(ledgerSql.contains("uuid"));
+        assertTrue(ledgerSql.contains("deleted_at IS NULL"));
+        assertTrue(ledgerSql.contains("FOR UPDATE"));
     }
 
     private Ledger ledger() {
@@ -413,6 +476,16 @@ class InviteServiceAuthorityAndVersionTests {
     @SuppressWarnings({"unchecked", "rawtypes"})
     private ArgumentCaptor<LambdaUpdateWrapper<LedgerMember>> memberUpdateCaptor() {
         return (ArgumentCaptor) ArgumentCaptor.forClass(LambdaUpdateWrapper.class);
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private ArgumentCaptor<Wrapper<Ledger>> ledgerWrapperCaptor() {
+        return (ArgumentCaptor) ArgumentCaptor.forClass(Wrapper.class);
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private ArgumentCaptor<Wrapper<LedgerInvite>> inviteWrapperCaptor() {
+        return (ArgumentCaptor) ArgumentCaptor.forClass(Wrapper.class);
     }
 
     @FunctionalInterface

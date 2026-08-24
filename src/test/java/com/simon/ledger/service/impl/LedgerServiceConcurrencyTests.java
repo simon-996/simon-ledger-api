@@ -9,6 +9,7 @@ import com.simon.ledger.common.ErrorCode;
 import com.simon.ledger.common.exception.BusinessException;
 import com.simon.ledger.common.exception.VersionConflictException;
 import com.simon.ledger.dto.req.LedgerUpdateReq;
+import com.simon.ledger.dto.req.LedgerCreateReq;
 import com.simon.ledger.dto.req.VersionDeleteReq;
 import com.simon.ledger.dto.resp.ConflictResp;
 import com.simon.ledger.dto.resp.LedgerResp;
@@ -47,8 +48,11 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -89,6 +93,43 @@ class LedgerServiceConcurrencyTests {
         verifyLedgerUpdate("deleted_at IS NULL", 2, 3);
         verify(ledgerMapper, never()).updateById(any(Ledger.class));
         verify(changeLogService).record(11L, "ledger", "ledger-uuid", "update", 7L);
+    }
+
+    @Test
+    void everyExistingLedgerMutationLocksLedgerBeforeLockingMembership() {
+        assertLedgerMutationLockOrder(ledger(2, null), member("owner", 5, null),
+                () -> service.update("ledger-uuid", updateReq(2)));
+        assertLedgerMutationLockOrder(ledger(2, null), member("owner", 5, null),
+                () -> service.delete("ledger-uuid", deleteReq(2)));
+        assertLedgerMutationLockOrder(ledger(2, LocalDateTime.now()), member("owner", 5, null),
+                () -> service.restore("ledger-uuid", updateReq(2)));
+        assertLedgerMutationLockOrder(ledger(2, null), member("editor", 5, null),
+                () -> service.leave("ledger-uuid", deleteReq(5)));
+    }
+
+    @Test
+    void createWritesBrandNewLedgerBeforeDependentForeignKeyRowsWithoutPreexistingCurrentLock() {
+        when(ledgerMapper.insert(any(Ledger.class))).thenAnswer(invocation -> {
+            Ledger inserted = invocation.getArgument(0);
+            inserted.setId(11L);
+            return 1;
+        });
+        when(memberMapper.insert(any(LedgerMember.class))).thenReturn(1);
+        when(userMapper.selectById(7L)).thenReturn(user());
+        LedgerCreateReq req = new LedgerCreateReq();
+        req.setName("New ledger");
+        req.setBaseCurrencyCode("cny");
+        req.setExchangeRateToCny(BigDecimal.ONE);
+
+        loggedIn(() -> service.create(req));
+
+        org.mockito.InOrder order = inOrder(ledgerMapper, memberMapper, changeLogService, userMapper);
+        order.verify(ledgerMapper).insert(any(Ledger.class));
+        order.verify(memberMapper).insert(any(LedgerMember.class));
+        order.verify(changeLogService).record(eq(11L), eq("ledger"), any(), eq("create"), eq(7L));
+        order.verify(userMapper).selectById(7L);
+        verify(ledgerMapper, never()).selectOne(any());
+        verify(userMapper, never()).selectOne(any());
     }
 
     @Test
@@ -313,6 +354,33 @@ class LedgerServiceConcurrencyTests {
         Transactional annotation = method.getAnnotation(Transactional.class);
         assertNotNull(annotation);
         assertEquals(Set.of(Exception.class), Set.of(annotation.rollbackFor()));
+    }
+
+    private void assertLedgerMutationLockOrder(Ledger ledger, LedgerMember member, ServiceCall<?> mutation) {
+        reset(ledgerMapper, memberMapper, userMapper, changeLogService, personService);
+        when(ledgerMapper.selectOne(any())).thenReturn(ledger);
+        when(memberMapper.selectOne(any())).thenReturn(member);
+        org.mockito.Mockito.lenient().when(ledgerMapper.update(isNull(), any())).thenReturn(1);
+        org.mockito.Mockito.lenient().when(memberMapper.update(isNull(), any())).thenReturn(1);
+        org.mockito.Mockito.lenient().when(memberMapper.selectList(any())).thenReturn(List.of(member));
+        org.mockito.Mockito.lenient().when(userMapper.selectList(any())).thenReturn(List.of(user()));
+
+        loggedIn(mutation);
+
+        ArgumentCaptor<Wrapper<Ledger>> ledgerRead = ledgerWrapperCaptor();
+        ArgumentCaptor<Wrapper<LedgerMember>> memberRead = memberWrapperCaptor();
+        org.mockito.InOrder order = inOrder(ledgerMapper, memberMapper);
+        order.verify(ledgerMapper).selectOne(ledgerRead.capture());
+        order.verify(memberMapper).selectOne(memberRead.capture());
+        String ledgerSql = ((com.baomidou.mybatisplus.core.conditions.AbstractWrapper<?, ?, ?>)
+                ledgerRead.getValue()).getSqlSegment();
+        String memberSql = ((com.baomidou.mybatisplus.core.conditions.AbstractWrapper<?, ?, ?>)
+                memberRead.getValue()).getSqlSegment();
+        assertTrue(ledgerSql.contains("uuid"));
+        assertTrue(ledgerSql.contains("FOR UPDATE"));
+        assertTrue(memberSql.contains("ledger_id"));
+        assertTrue(memberSql.contains("user_id"));
+        assertTrue(memberSql.contains("FOR UPDATE"));
     }
 
     private void verifyLedgerUpdate(String deletedPredicate, int submitted, int next) {

@@ -106,7 +106,7 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
     @Transactional(rollbackFor = Exception.class)
     public TransactionResp create(String ledgerUuid, TransactionCreateReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
-        Ledger ledger = requireLedger(ledgerUuid);
+        Ledger ledger = requireActiveLedgerForMutation(ledgerUuid);
         LedgerMember member = requireActiveMemberForUpdate(ledger.getId(), userId);
         if (!LedgerRoles.canCreateTransaction(member.getRole())) {
             throw new BusinessException(ErrorCode.FORBIDDEN);
@@ -163,7 +163,7 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
     @Transactional(rollbackFor = Exception.class)
     public TransactionResp update(String ledgerUuid, String transactionUuid, TransactionUpdateReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
-        Ledger ledger = requireLedger(ledgerUuid);
+        Ledger ledger = requireActiveLedgerForMutation(ledgerUuid);
         LedgerMember member = requireActiveMemberForUpdate(ledger.getId(), userId);
         LedgerTransaction transaction = requireTransactionForMutation(ledger.getId(), transactionUuid);
         requireEditPermission(member, transaction, userId);
@@ -214,7 +214,7 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
     @Transactional(rollbackFor = Exception.class)
     public VersionMutationResp delete(String ledgerUuid, String transactionUuid, VersionDeleteReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
-        Ledger ledger = requireLedger(ledgerUuid);
+        Ledger ledger = requireActiveLedgerForMutation(ledgerUuid);
         LedgerMember member = requireActiveMemberForUpdate(ledger.getId(), userId);
         LedgerTransaction transaction = requireTransactionForMutation(ledger.getId(), transactionUuid);
         requireEditPermission(member, transaction, userId);
@@ -249,7 +249,7 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
     @Transactional(rollbackFor = Exception.class)
     public TransactionResp restore(String ledgerUuid, String transactionUuid, TransactionUpdateReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
-        Ledger ledger = requireLedger(ledgerUuid);
+        Ledger ledger = requireActiveLedgerForMutation(ledgerUuid);
         LedgerMember member = requireActiveMemberForUpdate(ledger.getId(), userId);
         LedgerTransaction transaction = requireTransactionForMutation(ledger.getId(), transactionUuid);
         requireEditPermission(member, transaction, userId);
@@ -312,6 +312,17 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
         Ledger ledger = ledgerMapper.selectOne(Wrappers.<Ledger>lambdaQuery()
                 .eq(Ledger::getUuid, ledgerUuid)
                 .isNull(Ledger::getDeletedAt));
+        if (ledger == null) {
+            throw new BusinessException(ErrorCode.NOT_FOUND, "账本不存在");
+        }
+        return ledger;
+    }
+
+    private Ledger requireActiveLedgerForMutation(String ledgerUuid) {
+        Ledger ledger = ledgerMapper.selectOne(Wrappers.<Ledger>lambdaQuery()
+                .eq(Ledger::getUuid, ledgerUuid)
+                .isNull(Ledger::getDeletedAt)
+                .last("FOR UPDATE"));
         if (ledger == null) {
             throw new BusinessException(ErrorCode.NOT_FOUND, "账本不存在");
         }

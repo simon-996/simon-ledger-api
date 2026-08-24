@@ -56,7 +56,9 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -109,6 +111,37 @@ class MemberServiceConcurrencyTests {
         assertOperatorReadLockedAndScoped();
         verify(memberMapper, never()).updateById(any(LedgerMember.class));
         verify(changeLogService).record(11L, "member", "member-uuid", "update", 7L);
+    }
+
+    @Test
+    void everyMemberMutationLocksActiveLedgerThenOperatorThenTarget() {
+        assertMemberMutationLockOrder(member(22L, "member-uuid", 8L, LedgerRoles.EDITOR, 4, null),
+                () -> service.updateRole("ledger-uuid", "member-uuid", roleReq(4, LedgerRoles.VIEWER)));
+        assertMemberMutationLockOrder(member(22L, "member-uuid", 8L, LedgerRoles.VIEWER, 4, null),
+                () -> service.remove("ledger-uuid", "member-uuid", deleteReq(4)));
+        assertMemberMutationLockOrder(member(22L, "member-uuid", 8L, LedgerRoles.EDITOR, 4,
+                        LocalDateTime.now()),
+                () -> service.restore("ledger-uuid", "member-uuid", roleReq(4, LedgerRoles.VIEWER)));
+    }
+
+    @Test
+    void deletedLedgerOrRevokedOperatorStopsMemberMutationBeforeTargetWriteAndLog() {
+        when(ledgerMapper.selectOne(any())).thenReturn(null);
+        BusinessException deletedLedger = assertThrows(BusinessException.class,
+                () -> loggedIn(() -> service.updateRole(
+                        "ledger-uuid", "member-uuid", roleReq(4, LedgerRoles.VIEWER))));
+        assertEquals(ErrorCode.NOT_FOUND, deletedLedger.getErrorCode());
+        verify(memberMapper, never()).selectOne(any());
+
+        reset(ledgerMapper, memberMapper, userMapper, changeLogService);
+        when(ledgerMapper.selectOne(any())).thenReturn(ledger());
+        when(memberMapper.selectOne(any())).thenReturn(null);
+        BusinessException revoked = assertThrows(BusinessException.class,
+                () -> loggedIn(() -> service.remove("ledger-uuid", "member-uuid", deleteReq(4))));
+        assertEquals(ErrorCode.FORBIDDEN, revoked.getErrorCode());
+        verify(memberMapper, times(1)).selectOne(any());
+        verify(memberMapper, never()).update(isNull(), any());
+        verify(changeLogService, never()).record(any(), any(), any(), any(), any());
     }
 
     @Test
@@ -544,6 +577,35 @@ class MemberServiceConcurrencyTests {
         assertNull(exception.getData());
     }
 
+    private void assertMemberMutationLockOrder(LedgerMember target, ServiceCall<?> mutation) {
+        reset(ledgerMapper, memberMapper, userMapper, changeLogService);
+        LedgerMember owner = member(21L, "owner-member", 7L, LedgerRoles.OWNER, 3, null);
+        when(ledgerMapper.selectOne(any())).thenReturn(ledger());
+        when(memberMapper.selectOne(any())).thenReturn(owner, target);
+        when(memberMapper.update(isNull(), any())).thenReturn(1);
+        when(userMapper.selectById(8L)).thenReturn(user(8L));
+
+        loggedIn(mutation);
+
+        ArgumentCaptor<Wrapper<Ledger>> ledgerRead = ledgerWrapperCaptor();
+        ArgumentCaptor<Wrapper<LedgerMember>> memberReads = memberWrapperCaptor();
+        org.mockito.InOrder order = inOrder(ledgerMapper, memberMapper);
+        order.verify(ledgerMapper).selectOne(ledgerRead.capture());
+        order.verify(memberMapper, times(2)).selectOne(memberReads.capture());
+
+        String ledgerSql = ((AbstractWrapper<?, ?, ?>) ledgerRead.getValue()).getSqlSegment();
+        String operatorSql = ((AbstractWrapper<?, ?, ?>) memberReads.getAllValues().get(0)).getSqlSegment();
+        String targetSql = ((AbstractWrapper<?, ?, ?>) memberReads.getAllValues().get(1)).getSqlSegment();
+        assertTrue(ledgerSql.contains("uuid"));
+        assertTrue(ledgerSql.contains("deleted_at IS NULL"));
+        assertTrue(ledgerSql.contains("FOR UPDATE"));
+        assertTrue(operatorSql.contains("status"));
+        assertTrue(operatorSql.contains("deleted_at IS NULL"));
+        assertTrue(operatorSql.contains("FOR UPDATE"));
+        assertTrue(targetSql.contains("uuid"));
+        assertTrue(targetSql.contains("FOR UPDATE"));
+    }
+
     private void assertLatestReloadUsedForUpdate() {
         ArgumentCaptor<Wrapper<LedgerMember>> reload = memberWrapperCaptor();
         verify(memberMapper, times(3)).selectOne(reload.capture());
@@ -682,6 +744,11 @@ class MemberServiceConcurrencyTests {
 
     @SuppressWarnings({"unchecked", "rawtypes"})
     private ArgumentCaptor<Wrapper<LedgerMember>> memberWrapperCaptor() {
+        return (ArgumentCaptor) ArgumentCaptor.forClass(Wrapper.class);
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private ArgumentCaptor<Wrapper<Ledger>> ledgerWrapperCaptor() {
         return (ArgumentCaptor) ArgumentCaptor.forClass(Wrapper.class);
     }
 

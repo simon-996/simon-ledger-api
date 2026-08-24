@@ -58,7 +58,7 @@ public class MemberServiceImpl extends ServiceImpl<LedgerMemberMapper, LedgerMem
     @Transactional(rollbackFor = Exception.class)
     public MemberResp updateRole(String ledgerUuid, String memberUuid, MemberRoleUpdateReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
-        Ledger ledger = requireLedger(ledgerUuid);
+        Ledger ledger = requireActiveLedgerForMutation(ledgerUuid);
         LedgerMember operator = requireActiveMemberForUpdate(ledger.getId(), userId);
         requireManageMemberPermission(operator);
         LedgerMember target = requireMemberForMutation(ledger.getId(), memberUuid);
@@ -99,7 +99,7 @@ public class MemberServiceImpl extends ServiceImpl<LedgerMemberMapper, LedgerMem
     @Transactional(rollbackFor = Exception.class)
     public VersionMutationResp remove(String ledgerUuid, String memberUuid, VersionDeleteReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
-        Ledger ledger = requireLedger(ledgerUuid);
+        Ledger ledger = requireActiveLedgerForMutation(ledgerUuid);
         LedgerMember operator = requireActiveMemberForUpdate(ledger.getId(), userId);
         requireManageMemberPermission(operator);
         LedgerMember target = requireMemberForMutation(ledger.getId(), memberUuid);
@@ -136,7 +136,7 @@ public class MemberServiceImpl extends ServiceImpl<LedgerMemberMapper, LedgerMem
     @Transactional(rollbackFor = Exception.class)
     public MemberResp restore(String ledgerUuid, String memberUuid, MemberRoleUpdateReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
-        Ledger ledger = requireLedger(ledgerUuid);
+        Ledger ledger = requireActiveLedgerForMutation(ledgerUuid);
         LedgerMember operator = requireActiveMemberForUpdate(ledger.getId(), userId);
         requireManageMemberPermission(operator);
         LedgerMember target = requireMemberForMutation(ledger.getId(), memberUuid);
@@ -185,6 +185,17 @@ public class MemberServiceImpl extends ServiceImpl<LedgerMemberMapper, LedgerMem
         return ledger;
     }
 
+    private Ledger requireActiveLedgerForMutation(String ledgerUuid) {
+        Ledger ledger = ledgerMapper.selectOne(Wrappers.<Ledger>lambdaQuery()
+                .eq(Ledger::getUuid, ledgerUuid)
+                .isNull(Ledger::getDeletedAt)
+                .last("FOR UPDATE"));
+        if (ledger == null) {
+            throw new BusinessException(ErrorCode.NOT_FOUND, "账本不存在");
+        }
+        return ledger;
+    }
+
     private LedgerMember requireActiveMember(Long ledgerId, Long userId) {
         LedgerMember member = baseMapper.selectOne(Wrappers.<LedgerMember>lambdaQuery()
                 .eq(LedgerMember::getLedgerId, ledgerId)
@@ -200,7 +211,8 @@ public class MemberServiceImpl extends ServiceImpl<LedgerMemberMapper, LedgerMem
     private LedgerMember requireMemberForMutation(Long ledgerId, String memberUuid) {
         LedgerMember member = baseMapper.selectOne(Wrappers.<LedgerMember>lambdaQuery()
                 .eq(LedgerMember::getLedgerId, ledgerId)
-                .eq(LedgerMember::getUuid, memberUuid));
+                .eq(LedgerMember::getUuid, memberUuid)
+                .last("FOR UPDATE"));
         if (member == null) {
             throw new BusinessException(ErrorCode.NOT_FOUND, "成员不存在");
         }

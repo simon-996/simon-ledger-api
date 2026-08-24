@@ -135,7 +135,7 @@ public class LedgerServiceImpl extends ServiceImpl<LedgerMapper, Ledger> impleme
     public LedgerResp update(String ledgerUuid, LedgerUpdateReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
         Ledger ledger = requireLedgerForMutation(ledgerUuid);
-        LedgerMember member = requireActiveMember(ledger.getId(), userId);
+        LedgerMember member = requireActiveMemberForUpdate(ledger.getId(), userId);
         if (!LedgerRoles.canManageLedger(member.getRole())) {
             throw new BusinessException(ErrorCode.FORBIDDEN);
         }
@@ -173,7 +173,7 @@ public class LedgerServiceImpl extends ServiceImpl<LedgerMapper, Ledger> impleme
     public VersionMutationResp delete(String ledgerUuid, VersionDeleteReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
         Ledger ledger = requireLedgerForMutation(ledgerUuid);
-        LedgerMember member = requireActiveMember(ledger.getId(), userId);
+        LedgerMember member = requireActiveMemberForUpdate(ledger.getId(), userId);
         if (!LedgerRoles.isOwner(member.getRole())) {
             throw new BusinessException(ErrorCode.FORBIDDEN);
         }
@@ -205,7 +205,7 @@ public class LedgerServiceImpl extends ServiceImpl<LedgerMapper, Ledger> impleme
     public LedgerResp restore(String ledgerUuid, LedgerUpdateReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
         Ledger ledger = requireLedgerForMutation(ledgerUuid);
-        LedgerMember member = requireActiveMember(ledger.getId(), userId);
+        LedgerMember member = requireActiveMemberForUpdate(ledger.getId(), userId);
         if (!LedgerRoles.isOwner(member.getRole())) {
             throw new BusinessException(ErrorCode.FORBIDDEN);
         }
@@ -247,7 +247,8 @@ public class LedgerServiceImpl extends ServiceImpl<LedgerMapper, Ledger> impleme
         Ledger ledger = requireLedgerForMutation(ledgerUuid);
         LedgerMember member = ledgerMemberMapper.selectOne(Wrappers.<LedgerMember>lambdaQuery()
                 .eq(LedgerMember::getLedgerId, ledger.getId())
-                .eq(LedgerMember::getUserId, userId));
+                .eq(LedgerMember::getUserId, userId)
+                .last("FOR UPDATE"));
         if (member == null) {
             throw new BusinessException(ErrorCode.FORBIDDEN);
         }
@@ -307,7 +308,8 @@ public class LedgerServiceImpl extends ServiceImpl<LedgerMapper, Ledger> impleme
 
     private Ledger requireLedgerForMutation(String ledgerUuid) {
         Ledger ledger = baseMapper.selectOne(Wrappers.<Ledger>lambdaQuery()
-                .eq(Ledger::getUuid, ledgerUuid));
+                .eq(Ledger::getUuid, ledgerUuid)
+                .last("FOR UPDATE"));
         if (ledger == null) {
             throw new BusinessException(ErrorCode.NOT_FOUND, "账本不存在");
         }
@@ -330,6 +332,19 @@ public class LedgerServiceImpl extends ServiceImpl<LedgerMapper, Ledger> impleme
                 .eq(LedgerMember::getUserId, userId)
                 .eq(LedgerMember::getStatus, MEMBER_STATUS_ACTIVE)
                 .isNull(LedgerMember::getDeletedAt));
+        if (member == null) {
+            throw new BusinessException(ErrorCode.FORBIDDEN);
+        }
+        return member;
+    }
+
+    private LedgerMember requireActiveMemberForUpdate(Long ledgerId, Long userId) {
+        LedgerMember member = ledgerMemberMapper.selectOne(Wrappers.<LedgerMember>lambdaQuery()
+                .eq(LedgerMember::getLedgerId, ledgerId)
+                .eq(LedgerMember::getUserId, userId)
+                .eq(LedgerMember::getStatus, MEMBER_STATUS_ACTIVE)
+                .isNull(LedgerMember::getDeletedAt)
+                .last("FOR UPDATE"));
         if (member == null) {
             throw new BusinessException(ErrorCode.FORBIDDEN);
         }

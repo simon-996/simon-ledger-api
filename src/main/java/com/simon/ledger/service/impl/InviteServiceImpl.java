@@ -52,7 +52,7 @@ public class InviteServiceImpl extends ServiceImpl<LedgerInviteMapper, LedgerInv
     @Transactional(rollbackFor = Exception.class)
     public InviteResp create(String ledgerUuid, InviteCreateReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
-        Ledger ledger = requireLedger(ledgerUuid);
+        Ledger ledger = requireActiveLedgerForMutation(ledgerUuid);
         LedgerMember operator = requireActiveMemberForUpdate(ledger.getId(), userId);
         String role = normalizeRole(req.getRole());
         if (!LedgerRoles.isValidJoinableRole(role)) {
@@ -78,7 +78,7 @@ public class InviteServiceImpl extends ServiceImpl<LedgerInviteMapper, LedgerInv
     @Transactional(rollbackFor = Exception.class)
     public InviteResp regenerate(String ledgerUuid, InviteRegenerateReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
-        Ledger ledger = requireLedger(ledgerUuid);
+        Ledger ledger = requireActiveLedgerForMutation(ledgerUuid);
         LedgerMember operator = requireActiveMemberForUpdate(ledger.getId(), userId);
         int days = requireAllowedDays(req.getDays());
         String role = normalizeRole(req.getRole());
@@ -128,11 +128,9 @@ public class InviteServiceImpl extends ServiceImpl<LedgerInviteMapper, LedgerInv
     @Transactional(rollbackFor = Exception.class)
     public InviteResp join(String code) {
         Long userId = StpUtil.getLoginIdAsLong();
-        LedgerInvite invite = requireUsableInvite(code);
-        Ledger ledger = ledgerMapper.selectById(invite.getLedgerId());
-        if (ledger == null || ledger.getDeletedAt() != null) {
-            throw new BusinessException(ErrorCode.NOT_FOUND, "账本不存在");
-        }
+        LedgerInvite located = requireInvite(code);
+        Ledger ledger = requireActiveLedgerForMutation(located.getLedgerId());
+        LedgerInvite invite = requireUsableInviteForUpdate(located.getId(), code);
         String invitedRole = normalizeRole(invite.getRole());
         if (!LedgerRoles.isValidJoinableRole(invitedRole)) {
             throw new BusinessException(ErrorCode.BAD_REQUEST, "邀请角色不正确");
@@ -143,7 +141,8 @@ public class InviteServiceImpl extends ServiceImpl<LedgerInviteMapper, LedgerInv
 
         LedgerMember exists = ledgerMemberMapper.selectOne(Wrappers.<LedgerMember>lambdaQuery()
                 .eq(LedgerMember::getLedgerId, ledger.getId())
-                .eq(LedgerMember::getUserId, userId));
+                .eq(LedgerMember::getUserId, userId)
+                .last("FOR UPDATE"));
         if (exists != null && exists.getDeletedAt() == null
                 && Integer.valueOf(MEMBER_STATUS_ACTIVE).equals(exists.getStatus())) {
             throw new BusinessException(ErrorCode.BAD_REQUEST, "已加入该账本");
@@ -283,6 +282,28 @@ public class InviteServiceImpl extends ServiceImpl<LedgerInviteMapper, LedgerInv
         return ledger;
     }
 
+    private Ledger requireActiveLedgerForMutation(String ledgerUuid) {
+        Ledger ledger = ledgerMapper.selectOne(Wrappers.<Ledger>lambdaQuery()
+                .eq(Ledger::getUuid, ledgerUuid)
+                .isNull(Ledger::getDeletedAt)
+                .last("FOR UPDATE"));
+        if (ledger == null) {
+            throw new BusinessException(ErrorCode.NOT_FOUND, "账本不存在");
+        }
+        return ledger;
+    }
+
+    private Ledger requireActiveLedgerForMutation(Long ledgerId) {
+        Ledger ledger = ledgerMapper.selectOne(Wrappers.<Ledger>lambdaQuery()
+                .eq(Ledger::getId, ledgerId)
+                .isNull(Ledger::getDeletedAt)
+                .last("FOR UPDATE"));
+        if (ledger == null) {
+            throw new BusinessException(ErrorCode.NOT_FOUND, "账本不存在");
+        }
+        return ledger;
+    }
+
     private LedgerMember requireActiveMember(Long ledgerId, Long userId) {
         LedgerMember member = ledgerMemberMapper.selectOne(Wrappers.<LedgerMember>lambdaQuery()
                 .eq(LedgerMember::getLedgerId, ledgerId)
@@ -345,8 +366,14 @@ public class InviteServiceImpl extends ServiceImpl<LedgerInviteMapper, LedgerInv
         return invite;
     }
 
-    private LedgerInvite requireUsableInvite(String code) {
-        LedgerInvite invite = requireInvite(code);
+    private LedgerInvite requireUsableInviteForUpdate(Long inviteId, String code) {
+        LedgerInvite invite = baseMapper.selectOne(Wrappers.<LedgerInvite>lambdaQuery()
+                .eq(LedgerInvite::getId, inviteId)
+                .eq(LedgerInvite::getCode, code)
+                .last("FOR UPDATE"));
+        if (invite == null) {
+            throw new BusinessException(ErrorCode.NOT_FOUND, "邀请码不存在");
+        }
         if (invite.getDisabledAt() != null) {
             throw new BusinessException(ErrorCode.BAD_REQUEST, "邀请码已禁用");
         }
