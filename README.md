@@ -45,6 +45,7 @@ sql/
   001_init_schema.sql
   002_add_transaction_payer.sql
   003_add_admin_console.sql
+  004_add_optimistic_versions.sql
 ```
 
 ## 主要接口
@@ -72,23 +73,27 @@ POST   /api/ledgers/with-people
 GET    /api/ledgers/{ledgerUuid}
 PUT    /api/ledgers/{ledgerUuid}
 DELETE /api/ledgers/{ledgerUuid}
+POST   /api/ledgers/{ledgerUuid}/restore
 POST   /api/ledgers/{ledgerUuid}/leave
 
 GET    /api/ledgers/{ledgerUuid}/members
 PUT    /api/ledgers/{ledgerUuid}/members/{memberUuid}/role
 DELETE /api/ledgers/{ledgerUuid}/members/{memberUuid}
+POST   /api/ledgers/{ledgerUuid}/members/{memberUuid}/restore
 
 GET    /api/ledgers/people?ledgerUuids=uuid1,uuid2
 GET    /api/ledgers/{ledgerUuid}/people
 POST   /api/ledgers/{ledgerUuid}/people
 PUT    /api/ledgers/{ledgerUuid}/people/{personUuid}
 DELETE /api/ledgers/{ledgerUuid}/people/{personUuid}
+POST   /api/ledgers/{ledgerUuid}/people/{personUuid}/restore
 
 GET    /api/ledgers/{ledgerUuid}/transactions
 POST   /api/ledgers/{ledgerUuid}/transactions
 GET    /api/ledgers/{ledgerUuid}/transactions/{transactionUuid}
 PUT    /api/ledgers/{ledgerUuid}/transactions/{transactionUuid}
 DELETE /api/ledgers/{ledgerUuid}/transactions/{transactionUuid}
+POST   /api/ledgers/{ledgerUuid}/transactions/{transactionUuid}/restore
 
 GET    /api/ledgers/{ledgerUuid}/invites/current
 POST   /api/ledgers/{ledgerUuid}/invites
@@ -142,7 +147,9 @@ Token Header：
 simon-ledger: <token>
 ```
 
-写接口使用 `Idempotency-Key` 或 `clientOperationId` 防止重复提交。流水编辑和删除需要携带 `version`，版本不一致返回 `409001`。
+写接口使用 `Idempotency-Key` 或 `clientOperationId` 防止重复提交。账户资料、账本、成员、参与人和流水的更新、软删除与恢复都需要携带当前 `version`；`DELETE` 和退出账本的请求体为 `{ "version": 3 }`，恢复请求沿用对应更新请求并携带 `version`。成功响应包含递增后的新版本，调用方必须立即保存。
+
+版本或远端删除状态不一致时返回 HTTP 409 / 业务码 `409001`。响应 `data` 包含 `entityType`、`entityUuid`、`submittedVersion`、`remoteVersion`、`remoteDeleted` 和不含数据库主键、密码等内部信息的 `remoteSnapshot`，调用方应据此逐项处理冲突。
 
 ## 本地配置
 
@@ -152,13 +159,17 @@ simon-ledger: <token>
 src/main/resources/application-prod.yml.example
 ```
 
-数据库初始化需要执行：
+全新数据库直接执行当前 `001_init_schema.sql`，其中已经包含流水付款人字段和五类实体的 `version` 字段；随后按需执行 `003_add_admin_console.sql`。不要再对这类全新结构执行 `002` 或 `004`，否则会重复添加已有字段。
+
+历史数据库只执行尚未应用的增量脚本，并严格按编号顺序升级：
 
 ```text
-sql/001_init_schema.sql
 sql/002_add_transaction_payer.sql
 sql/003_add_admin_console.sql
+sql/004_add_optimistic_versions.sql
 ```
+
+`004_add_optimistic_versions.sql` 必须在可丢弃的 MySQL 8 数据库同时验证全新初始化和历史结构升级路径后再部署；升级完成后，`user_account`、`ledger`、`ledger_member`、`ledger_person`、`ledger_transaction` 的 `version` 都应为 `INT NOT NULL DEFAULT 1`。
 
 `003_add_admin_console.sql` 会创建 `admin_user` 和 `admin_operation_log`。首个后台管理员不会自动创建，需要先生成 BCrypt 密码 hash，再手动插入 `admin_user`。
 
