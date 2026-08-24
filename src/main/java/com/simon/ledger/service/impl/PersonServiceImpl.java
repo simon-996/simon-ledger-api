@@ -7,9 +7,13 @@ import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.simon.ledger.common.ErrorCode;
 import com.simon.ledger.common.LedgerRoles;
 import com.simon.ledger.common.exception.BusinessException;
+import com.simon.ledger.common.exception.VersionConflictException;
 import com.simon.ledger.dto.req.PersonCreateReq;
 import com.simon.ledger.dto.req.PersonUpdateReq;
+import com.simon.ledger.dto.req.VersionDeleteReq;
+import com.simon.ledger.dto.resp.ConflictResp;
 import com.simon.ledger.dto.resp.PersonResp;
+import com.simon.ledger.dto.resp.VersionMutationResp;
 import com.simon.ledger.entity.Ledger;
 import com.simon.ledger.entity.LedgerMember;
 import com.simon.ledger.entity.LedgerPerson;
@@ -145,9 +149,12 @@ public class PersonServiceImpl extends ServiceImpl<LedgerPersonMapper, LedgerPer
     public PersonResp update(String ledgerUuid, String personUuid, PersonUpdateReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
         Ledger ledger = requireLedger(ledgerUuid);
-        LedgerMember member = requireActiveMember(ledger.getId(), userId);
+        LedgerMember member = requireActiveMemberForUpdate(ledger.getId(), userId);
         requireManagePeoplePermission(member);
-        LedgerPerson person = requirePerson(ledger.getId(), personUuid);
+        LedgerPerson person = requirePersonForMutation(ledger.getId(), personUuid);
+        if (person.getDeletedAt() != null || !Objects.equals(person.getVersion(), req.getVersion())) {
+            throw personConflict(ledger, person, req.getVersion());
+        }
 
         UserAccount linkedUser = findLinkedUser(req.getLinkedUserUuid());
         if (linkedUser != null) {
@@ -156,10 +163,29 @@ public class PersonServiceImpl extends ServiceImpl<LedgerPersonMapper, LedgerPer
             ensureManualNameNotUsed(ledger.getId(), req.getName(), person.getId());
         }
 
-        person.setLinkedUserId(linkedUser == null ? null : linkedUser.getId());
-        person.setName(req.getName().trim());
-        person.setAvatar(normalizeAvatar(req.getAvatar()));
-        updateById(person);
+        Long linkedUserId = linkedUser == null ? null : linkedUser.getId();
+        String name = req.getName().trim();
+        String avatar = normalizeAvatar(req.getAvatar());
+        LocalDateTime updatedAt = LocalDateTime.now();
+        int nextVersion = req.getVersion() + 1;
+        int affected = baseMapper.update(null, Wrappers.<LedgerPerson>lambdaUpdate()
+                .eq(LedgerPerson::getId, person.getId())
+                .eq(LedgerPerson::getVersion, req.getVersion())
+                .isNull(LedgerPerson::getDeletedAt)
+                .set(LedgerPerson::getLinkedUserId, linkedUserId)
+                .set(LedgerPerson::getName, name)
+                .set(LedgerPerson::getAvatar, avatar)
+                .set(LedgerPerson::getVersion, nextVersion)
+                .set(LedgerPerson::getUpdatedAt, updatedAt));
+        if (affected == 0) {
+            LedgerPerson latest = reloadPersonForUpdate(person.getId(), personUuid);
+            throw personConflict(ledger, latest, req.getVersion());
+        }
+        person.setLinkedUserId(linkedUserId);
+        person.setName(name);
+        person.setAvatar(avatar);
+        person.setVersion(nextVersion);
+        person.setUpdatedAt(updatedAt);
         changeLogService.record(ledger.getId(), "person", person.getUuid(), "update", userId);
 
         return toResp(ledger, person, linkedUser);
@@ -167,16 +193,82 @@ public class PersonServiceImpl extends ServiceImpl<LedgerPersonMapper, LedgerPer
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public void delete(String ledgerUuid, String personUuid) {
+    public VersionMutationResp delete(String ledgerUuid, String personUuid, VersionDeleteReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
         Ledger ledger = requireLedger(ledgerUuid);
-        LedgerMember member = requireActiveMember(ledger.getId(), userId);
+        LedgerMember member = requireActiveMemberForUpdate(ledger.getId(), userId);
         requireManagePeoplePermission(member);
-        LedgerPerson person = requirePerson(ledger.getId(), personUuid);
+        LedgerPerson person = requirePersonForMutation(ledger.getId(), personUuid);
+        if (person.getDeletedAt() != null || !Objects.equals(person.getVersion(), req.getVersion())) {
+            throw personConflict(ledger, person, req.getVersion());
+        }
 
-        person.setDeletedAt(LocalDateTime.now());
-        updateById(person);
+        LocalDateTime updatedAt = LocalDateTime.now();
+        int nextVersion = req.getVersion() + 1;
+        int affected = baseMapper.update(null, Wrappers.<LedgerPerson>lambdaUpdate()
+                .eq(LedgerPerson::getId, person.getId())
+                .eq(LedgerPerson::getVersion, req.getVersion())
+                .isNull(LedgerPerson::getDeletedAt)
+                .set(LedgerPerson::getDeletedAt, updatedAt)
+                .set(LedgerPerson::getUpdatedAt, updatedAt)
+                .set(LedgerPerson::getVersion, nextVersion));
+        if (affected == 0) {
+            LedgerPerson latest = reloadPersonForUpdate(person.getId(), personUuid);
+            throw personConflict(ledger, latest, req.getVersion());
+        }
+        person.setDeletedAt(updatedAt);
+        person.setUpdatedAt(updatedAt);
+        person.setVersion(nextVersion);
         changeLogService.record(ledger.getId(), "person", person.getUuid(), "delete", userId);
+        return new VersionMutationResp(person.getUuid(), nextVersion, true);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public PersonResp restore(String ledgerUuid, String personUuid, PersonUpdateReq req) {
+        Long userId = StpUtil.getLoginIdAsLong();
+        Ledger ledger = requireLedger(ledgerUuid);
+        LedgerMember member = requireActiveMemberForUpdate(ledger.getId(), userId);
+        requireManagePeoplePermission(member);
+        LedgerPerson person = requirePersonForMutation(ledger.getId(), personUuid);
+        if (person.getDeletedAt() == null || !Objects.equals(person.getVersion(), req.getVersion())) {
+            throw personConflict(ledger, person, req.getVersion());
+        }
+
+        UserAccount linkedUser = findLinkedUser(req.getLinkedUserUuid());
+        if (linkedUser != null) {
+            ensureLinkedUserNotBound(ledger.getId(), linkedUser.getId(), person.getId());
+        } else {
+            ensureManualNameNotUsed(ledger.getId(), req.getName(), person.getId());
+        }
+
+        Long linkedUserId = linkedUser == null ? null : linkedUser.getId();
+        String name = req.getName().trim();
+        String avatar = normalizeAvatar(req.getAvatar());
+        LocalDateTime updatedAt = LocalDateTime.now();
+        int nextVersion = req.getVersion() + 1;
+        int affected = baseMapper.update(null, Wrappers.<LedgerPerson>lambdaUpdate()
+                .eq(LedgerPerson::getId, person.getId())
+                .eq(LedgerPerson::getVersion, req.getVersion())
+                .isNotNull(LedgerPerson::getDeletedAt)
+                .set(LedgerPerson::getLinkedUserId, linkedUserId)
+                .set(LedgerPerson::getName, name)
+                .set(LedgerPerson::getAvatar, avatar)
+                .set(LedgerPerson::getDeletedAt, null)
+                .set(LedgerPerson::getUpdatedAt, updatedAt)
+                .set(LedgerPerson::getVersion, nextVersion));
+        if (affected == 0) {
+            LedgerPerson latest = reloadPersonForUpdate(person.getId(), personUuid);
+            throw personConflict(ledger, latest, req.getVersion());
+        }
+        person.setLinkedUserId(linkedUserId);
+        person.setName(name);
+        person.setAvatar(avatar);
+        person.setDeletedAt(null);
+        person.setUpdatedAt(updatedAt);
+        person.setVersion(nextVersion);
+        changeLogService.record(ledger.getId(), "person", person.getUuid(), "update", userId);
+        return toResp(ledger, person, linkedUser);
     }
 
     private Ledger requireLedger(String ledgerUuid) {
@@ -213,16 +305,37 @@ public class PersonServiceImpl extends ServiceImpl<LedgerPersonMapper, LedgerPer
         return member;
     }
 
-    private LedgerPerson requirePerson(Long ledgerId, String personUuid) {
-        LedgerPerson person = lambdaQuery()
+    private LedgerMember requireActiveMemberForUpdate(Long ledgerId, Long userId) {
+        LedgerMember member = ledgerMemberMapper.selectOne(Wrappers.<LedgerMember>lambdaQuery()
+                .eq(LedgerMember::getLedgerId, ledgerId)
+                .eq(LedgerMember::getUserId, userId)
+                .eq(LedgerMember::getStatus, MEMBER_STATUS_ACTIVE)
+                .isNull(LedgerMember::getDeletedAt)
+                .last("FOR UPDATE"));
+        if (member == null) {
+            throw new BusinessException(ErrorCode.FORBIDDEN);
+        }
+        return member;
+    }
+
+    private LedgerPerson requirePersonForMutation(Long ledgerId, String personUuid) {
+        LedgerPerson person = baseMapper.selectOne(Wrappers.<LedgerPerson>lambdaQuery()
                 .eq(LedgerPerson::getLedgerId, ledgerId)
-                .eq(LedgerPerson::getUuid, personUuid)
-                .isNull(LedgerPerson::getDeletedAt)
-                .one();
+                .eq(LedgerPerson::getUuid, personUuid));
         if (person == null) {
             throw new BusinessException(ErrorCode.NOT_FOUND, "参与人不存在");
         }
         return person;
+    }
+
+    private LedgerPerson reloadPersonForUpdate(Long personId, String personUuid) {
+        LedgerPerson latest = baseMapper.selectOne(Wrappers.<LedgerPerson>lambdaQuery()
+                .eq(LedgerPerson::getId, personId)
+                .last("FOR UPDATE"));
+        if (latest == null) {
+            throw new BusinessException(ErrorCode.NOT_FOUND, "参与人不存在: " + personUuid);
+        }
+        return latest;
     }
 
     private void requireManagePeoplePermission(LedgerMember member) {
@@ -245,11 +358,10 @@ public class PersonServiceImpl extends ServiceImpl<LedgerPersonMapper, LedgerPer
     }
 
     private void ensureLinkedUserNotBound(Long ledgerId, Long linkedUserId, Long currentPersonId) {
-        LedgerPerson exists = lambdaQuery()
+        LedgerPerson exists = baseMapper.selectOne(Wrappers.<LedgerPerson>lambdaQuery()
                 .eq(LedgerPerson::getLedgerId, ledgerId)
                 .eq(LedgerPerson::getLinkedUserId, linkedUserId)
-                .isNull(LedgerPerson::getDeletedAt)
-                .one();
+                .isNull(LedgerPerson::getDeletedAt));
         if (exists != null && !Objects.equals(exists.getId(), currentPersonId)) {
             throw new BusinessException(ErrorCode.BAD_REQUEST, "该用户已绑定到账本参与人");
         }
@@ -257,12 +369,11 @@ public class PersonServiceImpl extends ServiceImpl<LedgerPersonMapper, LedgerPer
 
     private void ensureManualNameNotUsed(Long ledgerId, String name, Long currentPersonId) {
         String normalizedName = name == null ? "" : name.trim();
-        LedgerPerson exists = lambdaQuery()
+        LedgerPerson exists = baseMapper.selectOne(Wrappers.<LedgerPerson>lambdaQuery()
                 .eq(LedgerPerson::getLedgerId, ledgerId)
                 .isNull(LedgerPerson::getLinkedUserId)
                 .eq(LedgerPerson::getName, normalizedName)
-                .isNull(LedgerPerson::getDeletedAt)
-                .one();
+                .isNull(LedgerPerson::getDeletedAt));
         if (exists != null && !Objects.equals(exists.getId(), currentPersonId)) {
             throw new BusinessException(ErrorCode.BAD_REQUEST, "手动参与人名称不能重复");
         }
@@ -302,6 +413,21 @@ public class PersonServiceImpl extends ServiceImpl<LedgerPersonMapper, LedgerPer
         resp.setCreatedAt(person.getCreatedAt());
         resp.setUpdatedAt(person.getUpdatedAt());
         return resp;
+    }
+
+    private VersionConflictException personConflict(Ledger ledger, LedgerPerson person, Integer submittedVersion) {
+        UserAccount linkedUser = person.getLinkedUserId() == null
+                ? null
+                : userAccountMapper.selectById(person.getLinkedUserId());
+        PersonResp snapshot = toResp(ledger, person, linkedUser);
+        return new VersionConflictException(new ConflictResp(
+                "person",
+                person.getUuid(),
+                submittedVersion,
+                person.getVersion(),
+                person.getDeletedAt() != null,
+                snapshot
+        ));
     }
 
     private String normalizeAvatar(String avatar) {

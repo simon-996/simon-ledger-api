@@ -3,7 +3,9 @@ package com.simon.ledger.controller;
 import com.simon.ledger.common.Result;
 import com.simon.ledger.dto.req.PersonCreateReq;
 import com.simon.ledger.dto.req.PersonUpdateReq;
+import com.simon.ledger.dto.req.VersionDeleteReq;
 import com.simon.ledger.dto.resp.PersonResp;
+import com.simon.ledger.dto.resp.VersionMutationResp;
 import com.simon.ledger.service.IdempotencyService;
 import com.simon.ledger.service.PersonService;
 import io.swagger.v3.oas.annotations.Operation;
@@ -72,17 +74,35 @@ public class PersonController {
 
     @Operation(summary = "删除参与人")
     @DeleteMapping("/{personUuid}")
-    public Result<Void> delete(
+    public Result<VersionMutationResp> delete(
             @PathVariable String ledgerUuid,
             @PathVariable String personUuid,
-            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            @Valid @RequestBody VersionDeleteReq req
     ) {
-        idempotencyService.executeVoid(
+        return Result.ok(idempotencyService.execute(
                 idempotencyKey,
                 "DELETE",
                 "/api/ledgers/" + ledgerUuid + "/people/" + personUuid,
-                () -> personService.delete(ledgerUuid, personUuid)
-        );
-        return Result.ok();
+                VersionMutationResp.class,
+                () -> personService.delete(ledgerUuid, personUuid, req)
+        ));
+    }
+
+    @Operation(summary = "恢复参与人")
+    @PostMapping("/{personUuid}/restore")
+    public Result<PersonResp> restore(
+            @PathVariable String ledgerUuid,
+            @PathVariable String personUuid,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            @Valid @RequestBody PersonUpdateReq req
+    ) {
+        return Result.ok(idempotencyService.execute(
+                idempotencyKey,
+                "POST",
+                "/api/ledgers/" + ledgerUuid + "/people/" + personUuid + "/restore",
+                PersonResp.class,
+                () -> personService.restore(ledgerUuid, personUuid, req)
+        ));
     }
 }
