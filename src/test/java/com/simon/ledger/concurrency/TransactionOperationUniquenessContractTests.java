@@ -55,7 +55,7 @@ class TransactionOperationUniquenessContractTests {
     }
 
     @Test
-    void readmeDocumentsPreflightManualCleanupOrderAndUnverifiedMysqlExecution() throws Exception {
+    void readmeDocumentsPreflightManualCleanupOrderAndVerifiedMysqlExecution() throws Exception {
         String readme = Files.readString(Path.of("README.md"));
         String normalized = normalize(readme);
 
@@ -69,7 +69,10 @@ class TransactionOperationUniquenessContractTests {
                 < normalized.indexOf("sql/005_add_transaction_operation_uniqueness.sql"));
         assertTrue(normalized.contains("一次性执行"));
         assertTrue(normalized.contains("mysql 8"));
-        assertTrue(normalized.contains("尚未完成") || normalized.contains("未完成"));
+        assertTrue(normalized.contains("mysql 8.4.11"));
+        assertTrue(normalized.contains("2026-08-26"));
+        assertTrue(normalized.contains("已完成"));
+        assertFalse(normalized.contains("尚未完成"));
         assertContainsNormalized(normalized, "fresh 001");
         assertTrue(normalized.contains("不要再") || normalized.contains("不得再"));
     }

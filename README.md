@@ -171,7 +171,7 @@ sql/004_add_optimistic_versions.sql
 sql/005_add_transaction_operation_uniqueness.sql
 ```
 
-`004_add_optimistic_versions.sql` 必须在可丢弃的 MySQL 8 数据库同时验证全新初始化和历史结构升级路径后再部署；升级完成后，`user_account`、`ledger`、`ledger_member`、`ledger_person`、`ledger_transaction` 的 `version` 都应为 `INT NOT NULL DEFAULT 1`。
+`004_add_optimistic_versions.sql` 升级完成后，`user_account`、`ledger`、`ledger_member`、`ledger_person`、`ledger_transaction` 的 `version` 都应为 `INT NOT NULL DEFAULT 1`。
 
 `005_add_transaction_operation_uniqueness.sql` 是一次性执行的历史库增量。在执行前，先运行下面的只读 preflight SQL，查找仍有效流水中重复的 `clientOperationId`：
 
@@ -186,7 +186,7 @@ HAVING COUNT(*) > 1;
 
 如果查询返回记录，必须先人工核对并逐项处理，再执行 `005`；升级脚本不自动删除、修改或合并任何账目。该唯一键使用生成列令有效流水的 slot 为 `1`、已删除流水的 slot 为 `NULL`：同一账本、同一创建人、同一非空 operation id 只能有一条有效流水；历史删除记录可以保留多条，legacy 的 `client_operation_id = NULL` 记录也不会互相冲突。
 
-当前环境没有可丢弃的真实 MySQL 8 实例，因此 `005` 的 disposable MySQL 8 语法与升级实库验证尚未完成；部署前仍需完成该验证，不能用静态契约测试替代。
+2026-08-26 已完成可丢弃的 MySQL 8.4.11 实库验证：当前 Fresh 001 可直接初始化；历史 `001 + 002 + 003` 可依次升级到 `004 + 005`；`004` 会把历史已有数据的版本回填为 `1`；preflight 能发现有效流水的重复 operation id，`005` 会拒绝脏数据且失败后不留下部分 DDL，人工处理重复项后可重新执行。唯一键还实测确认了有效记录唯一、软删除历史可共存、legacy `NULL` operation id 可共存，以及不同账本或不同创建人的同名 operation id 互不冲突。
 
 `003_add_admin_console.sql` 会创建 `admin_user` 和 `admin_operation_log`。首个后台管理员不会自动创建，需要先生成 BCrypt 密码 hash，再手动插入 `admin_user`。
 
