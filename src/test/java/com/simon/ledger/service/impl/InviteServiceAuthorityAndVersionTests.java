@@ -13,15 +13,18 @@ import com.simon.ledger.common.exception.VersionConflictException;
 import com.simon.ledger.dto.req.InviteCreateReq;
 import com.simon.ledger.dto.req.InviteRegenerateReq;
 import com.simon.ledger.dto.resp.InviteResp;
+import com.simon.ledger.dto.resp.InviteJoinResp;
 import com.simon.ledger.dto.resp.ConflictResp;
 import com.simon.ledger.dto.resp.MemberResp;
 import com.simon.ledger.entity.Ledger;
 import com.simon.ledger.entity.LedgerInvite;
 import com.simon.ledger.entity.LedgerMember;
+import com.simon.ledger.entity.LedgerPerson;
 import com.simon.ledger.entity.UserAccount;
 import com.simon.ledger.mapper.LedgerInviteMapper;
 import com.simon.ledger.mapper.LedgerMapper;
 import com.simon.ledger.mapper.LedgerMemberMapper;
+import com.simon.ledger.mapper.LedgerPersonMapper;
 import com.simon.ledger.mapper.UserAccountMapper;
 import com.simon.ledger.service.ChangeLogService;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
@@ -55,6 +58,7 @@ class InviteServiceAuthorityAndVersionTests {
     @Mock private LedgerInviteMapper inviteMapper;
     @Mock private LedgerMapper ledgerMapper;
     @Mock private LedgerMemberMapper memberMapper;
+    @Mock private LedgerPersonMapper personMapper;
     @Mock private UserAccountMapper userMapper;
     @Mock private ChangeLogService changeLogService;
 
@@ -65,9 +69,11 @@ class InviteServiceAuthorityAndVersionTests {
         initializeLambdaMetadata(LedgerInvite.class);
         initializeLambdaMetadata(Ledger.class);
         initializeLambdaMetadata(LedgerMember.class);
+        initializeLambdaMetadata(LedgerPerson.class);
         initializeLambdaMetadata(UserAccount.class);
         service = new InviteServiceImpl(ledgerMapper, memberMapper, userMapper, changeLogService);
         ReflectionTestUtils.setField(service, "baseMapper", inviteMapper);
+        ReflectionTestUtils.setField(service, "ledgerPersonMapper", personMapper);
     }
 
     @Test
@@ -113,11 +119,10 @@ class InviteServiceAuthorityAndVersionTests {
         when(inviteMapper.selectOne(any())).thenReturn(located, located);
         when(ledgerMapper.selectOne(any())).thenReturn(ledger());
         when(memberMapper.selectOne(any())).thenReturn(existing);
+        when(userMapper.selectOne(any())).thenReturn(user(7L));
+        when(personMapper.selectList(any())).thenReturn(List.of(person()));
 
-        BusinessException alreadyJoined = assertThrows(BusinessException.class,
-                () -> loggedIn(() -> service.join("INVITE01")));
-
-        assertEquals(ErrorCode.BAD_REQUEST, alreadyJoined.getErrorCode());
+        assertEquals("INVITE01", loggedIn(() -> service.join("INVITE01")).getCode());
         ArgumentCaptor<Wrapper<LedgerInvite>> initialInviteRead = inviteWrapperCaptor();
         ArgumentCaptor<Wrapper<Ledger>> ledgerRead = ledgerWrapperCaptor();
         ArgumentCaptor<Wrapper<LedgerInvite>> lockedInviteRead = inviteWrapperCaptor();
@@ -135,6 +140,92 @@ class InviteServiceAuthorityAndVersionTests {
         assertTrue(((AbstractWrapper<?, ?, ?>) lockedInviteRead.getValue()).getSqlSegment().contains("FOR UPDATE"));
         assertTrue(((AbstractWrapper<?, ?, ?>) memberRead.getValue()).getSqlSegment().contains("FOR UPDATE"));
         verify(changeLogService, never()).record(any(), any(), any(), any(), any());
+        verify(inviteMapper, never()).update(any(), any());
+    }
+
+    @Test
+    void firstJoinCreatesMemberAndLinkedPersonInOneAdmission() {
+        LedgerInvite invite = invite(LedgerRoles.VIEWER, 9L);
+        UserAccount joiningUser = user(7L);
+        when(inviteMapper.selectOne(any())).thenReturn(invite, invite);
+        when(ledgerMapper.selectOne(any())).thenReturn(ledger());
+        when(memberMapper.selectOne(any())).thenReturn(null);
+        when(memberMapper.insert(any(LedgerMember.class))).thenReturn(1);
+        when(memberMapper.selectList(any())).thenReturn(List.of(member(22L, "new-member", 7L,
+                LedgerRoles.VIEWER, 1, null)));
+        when(userMapper.selectOne(any())).thenReturn(joiningUser);
+        when(personMapper.selectList(any())).thenReturn(List.of());
+        when(personMapper.insert(any(LedgerPerson.class))).thenReturn(1);
+        when(inviteMapper.update(isNull(), any())).thenReturn(1);
+
+        InviteJoinResp response = loggedIn(() -> service.join("INVITE01"));
+
+        assertEquals("INVITE01", response.getCode());
+        assertEquals("ledger-uuid", response.getLedger().getUuid());
+        assertEquals(LedgerRoles.VIEWER, response.getMember().getRole());
+        assertEquals("Nickname", response.getPerson().getName());
+        assertEquals(1, response.getPerson().getVersion());
+        verify(memberMapper).insert(any(LedgerMember.class));
+        verify(personMapper).insert(any(LedgerPerson.class));
+        verify(inviteMapper).update(isNull(), any());
+        verify(changeLogService).record(org.mockito.ArgumentMatchers.eq(11L),
+                org.mockito.ArgumentMatchers.eq("member"), any(),
+                org.mockito.ArgumentMatchers.eq("create"), org.mockito.ArgumentMatchers.eq(7L));
+        verify(changeLogService).record(org.mockito.ArgumentMatchers.eq(11L),
+                org.mockito.ArgumentMatchers.eq("person"), any(),
+                org.mockito.ArgumentMatchers.eq("create"), org.mockito.ArgumentMatchers.eq(7L));
+    }
+
+    @Test
+    void deletedLinkedPersonIsRestoredWithSameUuidAndNextVersion() {
+        LedgerMember existingMember = restorableMember(0, 4, null);
+        LedgerPerson deletedPerson = person();
+        deletedPerson.setName("Former name");
+        deletedPerson.setVersion(4);
+        deletedPerson.setDeletedAt(LocalDateTime.now().minusDays(1));
+        stubExistingMemberJoin(existingMember);
+        when(userMapper.selectOne(any())).thenReturn(user(7L));
+        when(personMapper.selectList(any())).thenReturn(List.of(deletedPerson));
+        when(memberMapper.update(isNull(), any())).thenReturn(1);
+        when(personMapper.update(isNull(), any())).thenReturn(1);
+        when(inviteMapper.update(isNull(), any())).thenReturn(1);
+        when(memberMapper.selectList(any())).thenReturn(List.of());
+
+        InviteJoinResp response = loggedIn(() -> service.join("INVITE01"));
+
+        assertEquals("person-uuid", response.getPerson().getUuid());
+        assertEquals(5, response.getPerson().getVersion());
+        assertEquals("Nickname", response.getPerson().getName());
+        assertEquals(5, deletedPerson.getVersion());
+        assertNull(deletedPerson.getDeletedAt());
+        verify(personMapper).update(isNull(), any());
+        verify(changeLogService).record(11L, "person", "person-uuid", "update", 7L);
+    }
+
+    @Test
+    void profileChangeUpdatesLinkedPersonVersionWithoutConsumingInvite() {
+        LedgerMember activeMember = member(22L, "existing-member", 7L, LedgerRoles.VIEWER, 3, null);
+        LedgerPerson existingPerson = person();
+        existingPerson.setName("Old nickname");
+        existingPerson.setVersion(2);
+        LedgerInvite invite = invite(LedgerRoles.VIEWER, 9L);
+        invite.setMaxUses(1);
+        invite.setUsedCount(1);
+        when(inviteMapper.selectOne(any())).thenReturn(invite, invite);
+        when(ledgerMapper.selectOne(any())).thenReturn(ledger());
+        when(memberMapper.selectOne(any())).thenReturn(activeMember);
+        when(memberMapper.selectList(any())).thenReturn(List.of(activeMember));
+        when(userMapper.selectOne(any())).thenReturn(user(7L));
+        when(personMapper.selectList(any())).thenReturn(List.of(existingPerson));
+        when(personMapper.update(isNull(), any())).thenReturn(1);
+
+        InviteJoinResp response = loggedIn(() -> service.join("INVITE01"));
+
+        assertEquals("Nickname", response.getPerson().getName());
+        assertEquals(3, response.getPerson().getVersion());
+        verify(personMapper).update(isNull(), any());
+        verify(inviteMapper, never()).update(any(), any());
+        verify(changeLogService).record(11L, "person", "person-uuid", "update", 7L);
     }
 
     @Test
@@ -239,6 +330,7 @@ class InviteServiceAuthorityAndVersionTests {
         latest.setRole(LedgerRoles.EDITOR);
         UserAccount latestUser = user(8L);
         stubExistingMemberJoin(observed);
+        when(userMapper.selectOne(any())).thenReturn(user(7L));
         when(memberMapper.update(isNull(), any())).thenReturn(0);
         when(memberMapper.selectOne(any())).thenReturn(observed, latest);
         when(userMapper.selectById(8L)).thenReturn(latestUser);
@@ -275,6 +367,7 @@ class InviteServiceAuthorityAndVersionTests {
     void zeroRowExistingMemberRestoreWithMissingLatestReturnsDataSafeConflict() {
         LedgerMember observed = restorableMember(0, 4, null);
         stubExistingMemberJoin(observed);
+        when(userMapper.selectOne(any())).thenReturn(user(7L));
         when(memberMapper.update(isNull(), any())).thenReturn(0);
         when(memberMapper.selectOne(any())).thenReturn(observed).thenReturn(null);
 
@@ -297,6 +390,8 @@ class InviteServiceAuthorityAndVersionTests {
     private void assertAtomicExistingMemberRestore(int status, LocalDateTime deletedAt) {
         LedgerMember observed = restorableMember(status, 4, deletedAt);
         stubExistingMemberJoin(observed);
+        when(userMapper.selectOne(any())).thenReturn(user(observed.getUserId()));
+        when(personMapper.selectList(any())).thenReturn(List.of(person()));
         when(memberMapper.update(isNull(), any())).thenReturn(1);
         when(inviteMapper.update(isNull(), any())).thenReturn(1);
         when(memberMapper.selectList(any())).thenReturn(List.of());
@@ -422,6 +517,18 @@ class InviteServiceAuthorityAndVersionTests {
         user.setNickname("Nickname");
         user.setAvatar("avatar");
         return user;
+    }
+
+    private LedgerPerson person() {
+        LedgerPerson person = new LedgerPerson();
+        person.setId(31L);
+        person.setUuid("person-uuid");
+        person.setLedgerId(11L);
+        person.setLinkedUserId(7L);
+        person.setName("Nickname");
+        person.setAvatar("avatar");
+        person.setVersion(2);
+        return person;
     }
 
     private LedgerInvite invite(String role, Long createdByUserId) {

@@ -14,15 +14,21 @@ import com.simon.ledger.dto.req.InviteCreateReq;
 import com.simon.ledger.dto.req.InviteRegenerateReq;
 import com.simon.ledger.dto.resp.ConflictResp;
 import com.simon.ledger.dto.resp.InviteMemberSummaryResp;
+import com.simon.ledger.dto.resp.InviteJoinResp;
 import com.simon.ledger.dto.resp.InviteResp;
+import com.simon.ledger.dto.resp.LedgerMemberSummaryResp;
+import com.simon.ledger.dto.resp.LedgerResp;
 import com.simon.ledger.dto.resp.MemberResp;
+import com.simon.ledger.dto.resp.PersonResp;
 import com.simon.ledger.entity.Ledger;
 import com.simon.ledger.entity.LedgerInvite;
 import com.simon.ledger.entity.LedgerMember;
+import com.simon.ledger.entity.LedgerPerson;
 import com.simon.ledger.entity.UserAccount;
 import com.simon.ledger.mapper.LedgerInviteMapper;
 import com.simon.ledger.mapper.LedgerMapper;
 import com.simon.ledger.mapper.LedgerMemberMapper;
+import com.simon.ledger.mapper.LedgerPersonMapper;
 import com.simon.ledger.mapper.UserAccountMapper;
 import com.simon.ledger.service.ChangeLogService;
 import com.simon.ledger.service.InviteService;
@@ -45,6 +51,8 @@ public class InviteServiceImpl extends ServiceImpl<LedgerInviteMapper, LedgerInv
 
     private final LedgerMapper ledgerMapper;
     private final LedgerMemberMapper ledgerMemberMapper;
+    @org.springframework.beans.factory.annotation.Autowired
+    private LedgerPersonMapper ledgerPersonMapper;
     private final UserAccountMapper userAccountMapper;
     private final ChangeLogService changeLogService;
 
@@ -126,7 +134,7 @@ public class InviteServiceImpl extends ServiceImpl<LedgerInviteMapper, LedgerInv
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public InviteResp join(String code) {
+    public InviteJoinResp join(String code) {
         Long userId = StpUtil.getLoginIdAsLong();
         LedgerInvite located = requireInvite(code);
         Ledger ledger = requireActiveLedgerForMutation(located.getLedgerId());
@@ -143,26 +151,170 @@ public class InviteServiceImpl extends ServiceImpl<LedgerInviteMapper, LedgerInv
                 .eq(LedgerMember::getLedgerId, ledger.getId())
                 .eq(LedgerMember::getUserId, userId)
                 .last("FOR UPDATE"));
-        if (exists != null && exists.getDeletedAt() == null
-                && Integer.valueOf(MEMBER_STATUS_ACTIVE).equals(exists.getStatus())) {
-            throw new BusinessException(ErrorCode.BAD_REQUEST, "已加入该账本");
+        boolean admission = exists == null || exists.getDeletedAt() != null
+                || !Integer.valueOf(MEMBER_STATUS_ACTIVE).equals(exists.getStatus());
+        if (admission) {
+            ensureInviteCapacity(invite);
         }
+        UserAccount user = requireCurrentAccountForJoin(userId);
+        LedgerMember member;
         if (exists == null) {
-            LedgerMember member = new LedgerMember();
+            member = new LedgerMember();
             member.setUuid(IdUtil.fastSimpleUUID());
             member.setLedgerId(ledger.getId());
             member.setUserId(userId);
             member.setRole(invitedRole);
             member.setStatus(MEMBER_STATUS_ACTIVE);
             member.setJoinedAt(LocalDateTime.now());
-            ledgerMemberMapper.insert(member);
+            if (ledgerMemberMapper.insert(member) != 1) {
+                throw new BusinessException(ErrorCode.CONFLICT, "加入账本失败，请重试");
+            }
             changeLogService.record(ledger.getId(), "member", member.getUuid(), "create", userId);
         } else {
-            restoreExistingMember(ledger, exists, invitedRole, userId);
+            if (admission) {
+                restoreExistingMember(ledger, exists, invitedRole, userId);
+            }
+            member = exists;
         }
+        LedgerPerson person = ensureLinkedPerson(ledger, user, userId);
+        if (admission) {
+            incrementInviteUsage(invite);
+        }
+        return toJoinResp(invite, ledger, member, user, person);
+    }
 
-        incrementInviteUsage(invite);
-        return toResp(invite, ledger);
+    private UserAccount requireCurrentAccountForJoin(Long userId) {
+        UserAccount user = userAccountMapper.selectOne(Wrappers.<UserAccount>lambdaQuery()
+                .eq(UserAccount::getId, userId)
+                .eq(UserAccount::getStatus, 1)
+                .isNull(UserAccount::getDeletedAt)
+                .last("FOR UPDATE"));
+        if (user == null) {
+            throw new BusinessException(ErrorCode.FORBIDDEN, "账号不可用");
+        }
+        return user;
+    }
+
+    private void ensureInviteCapacity(LedgerInvite invite) {
+        if (invite.getMaxUses() != null && invite.getUsedCount() >= invite.getMaxUses()) {
+            throw new BusinessException(ErrorCode.BAD_REQUEST, "邀请码使用次数已达上限");
+        }
+    }
+
+    private LedgerPerson ensureLinkedPerson(Ledger ledger, UserAccount user, Long operatorId) {
+        List<LedgerPerson> candidates = ledgerPersonMapper.selectList(
+                Wrappers.<LedgerPerson>lambdaQuery()
+                        .eq(LedgerPerson::getLedgerId, ledger.getId())
+                        .eq(LedgerPerson::getLinkedUserId, user.getId())
+                        .orderByAsc(LedgerPerson::getId)
+                        .last("FOR UPDATE"));
+        LedgerPerson person = candidates.stream()
+                .filter(item -> item.getDeletedAt() == null)
+                .findFirst()
+                .orElseGet(() -> candidates.stream().findFirst().orElse(null));
+        LocalDateTime now = LocalDateTime.now();
+        if (person == null) {
+            person = new LedgerPerson();
+            person.setUuid(IdUtil.fastSimpleUUID());
+            person.setLedgerId(ledger.getId());
+            person.setLinkedUserId(user.getId());
+            person.setName(user.getNickname());
+            person.setAvatar(user.getAvatar());
+            person.setVersion(1);
+            if (ledgerPersonMapper.insert(person) != 1) {
+                throw new BusinessException(ErrorCode.CONFLICT, "创建参与人失败，请重试");
+            }
+            changeLogService.record(ledger.getId(), "person", person.getUuid(), "create", operatorId);
+            return person;
+        }
+        boolean changed = !java.util.Objects.equals(person.getName(), user.getNickname())
+                || !java.util.Objects.equals(person.getAvatar(), user.getAvatar())
+                || person.getDeletedAt() != null;
+        if (!changed) {
+            return person;
+        }
+        Integer observedVersion = person.getVersion();
+        int nextVersion = observedVersion + 1;
+        LambdaUpdateWrapper<LedgerPerson> update = Wrappers.<LedgerPerson>lambdaUpdate()
+                .eq(LedgerPerson::getId, person.getId())
+                .eq(LedgerPerson::getVersion, observedVersion)
+                .set(LedgerPerson::getName, user.getNickname())
+                .set(LedgerPerson::getAvatar, user.getAvatar())
+                .set(LedgerPerson::getUpdatedAt, now)
+                .set(LedgerPerson::getVersion, nextVersion);
+        if (person.getDeletedAt() != null) {
+            update.isNotNull(LedgerPerson::getDeletedAt)
+                    .set(LedgerPerson::getDeletedAt, null);
+        } else {
+            update.isNull(LedgerPerson::getDeletedAt);
+        }
+        if (ledgerPersonMapper.update(null, update) != 1) {
+            throw new BusinessException(ErrorCode.CONFLICT, "参与人状态已变化，请重试");
+        }
+        person.setName(user.getNickname());
+        person.setAvatar(user.getAvatar());
+        person.setDeletedAt(null);
+        person.setUpdatedAt(now);
+        person.setVersion(nextVersion);
+        changeLogService.record(ledger.getId(), "person", person.getUuid(), "update", operatorId);
+        return person;
+    }
+
+    private InviteJoinResp toJoinResp(
+            LedgerInvite invite,
+            Ledger ledger,
+            LedgerMember member,
+            UserAccount user,
+            LedgerPerson person
+    ) {
+        InviteResp inviteResp = toResp(invite, ledger);
+        MemberResp memberResp = toMemberResp(member, user);
+        PersonResp personResp = new PersonResp();
+        personResp.setUuid(person.getUuid());
+        personResp.setLedgerUuid(ledger.getUuid());
+        personResp.setLinkedUserUuid(user.getUuid());
+        personResp.setName(person.getName());
+        personResp.setAvatar(person.getAvatar());
+        personResp.setVersion(person.getVersion());
+        personResp.setCreatedAt(person.getCreatedAt());
+        personResp.setUpdatedAt(person.getUpdatedAt());
+
+        LedgerResp ledgerResp = new LedgerResp();
+        ledgerResp.setUuid(ledger.getUuid());
+        ledgerResp.setName(ledger.getName());
+        ledgerResp.setBaseCurrencyCode(ledger.getBaseCurrencyCode());
+        ledgerResp.setExchangeRateToCny(ledger.getExchangeRateToCny());
+        ledgerResp.setVersion(ledger.getVersion());
+        ledgerResp.setRole(member.getRole());
+        List<LedgerMember> activeMembers = ledgerMemberMapper.selectList(
+                Wrappers.<LedgerMember>lambdaQuery()
+                        .eq(LedgerMember::getLedgerId, ledger.getId())
+                        .eq(LedgerMember::getStatus, MEMBER_STATUS_ACTIVE)
+                        .isNull(LedgerMember::getDeletedAt)
+                        .orderByAsc(LedgerMember::getJoinedAt));
+        ledgerResp.setMemberCount(activeMembers.size());
+        Map<Long, UserAccount> users = userMap(activeMembers);
+        ledgerResp.setMembers(activeMembers.stream().map(item -> {
+            LedgerMemberSummaryResp summary = new LedgerMemberSummaryResp();
+            UserAccount linked = users.get(item.getUserId());
+            summary.setUuid(item.getUuid());
+            summary.setUserUuid(linked == null ? null : linked.getUuid());
+            summary.setNickname(linked == null ? null : linked.getNickname());
+            summary.setAvatar(linked == null ? null : linked.getAvatar());
+            summary.setRole(item.getRole());
+            summary.setVersion(item.getVersion());
+            return summary;
+        }).toList());
+        ledgerResp.setCreatedAt(ledger.getCreatedAt());
+        ledgerResp.setUpdatedAt(ledger.getUpdatedAt());
+
+        InviteJoinResp response = new InviteJoinResp();
+        org.springframework.beans.BeanUtils.copyProperties(inviteResp, response);
+        response.setInvite(inviteResp);
+        response.setLedger(ledgerResp);
+        response.setMember(memberResp);
+        response.setPerson(personResp);
+        return response;
     }
 
     private void restoreExistingMember(Ledger ledger, LedgerMember observed, String invitedRole, Long userId) {
@@ -379,9 +531,6 @@ public class InviteServiceImpl extends ServiceImpl<LedgerInviteMapper, LedgerInv
         }
         if (!invite.getExpiresAt().isAfter(LocalDateTime.now())) {
             throw new BusinessException(ErrorCode.BAD_REQUEST, "邀请码已过期");
-        }
-        if (invite.getMaxUses() != null && invite.getUsedCount() >= invite.getMaxUses()) {
-            throw new BusinessException(ErrorCode.BAD_REQUEST, "邀请码使用次数已达上限");
         }
         return invite;
     }

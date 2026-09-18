@@ -3,6 +3,7 @@ package com.simon.ledger.service;
 import com.simon.ledger.dto.req.InviteCreateReq;
 import com.simon.ledger.dto.req.InviteRegenerateReq;
 import com.simon.ledger.dto.resp.InviteResp;
+import com.simon.ledger.dto.resp.InviteJoinResp;
 
 public interface InviteService {
 
@@ -14,5 +15,5 @@ public interface InviteService {
 
     InviteResp getByCode(String code);
 
-    InviteResp join(String code);
+    InviteJoinResp join(String code);
 }

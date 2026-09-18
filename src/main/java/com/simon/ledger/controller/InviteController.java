@@ -4,6 +4,7 @@ import com.simon.ledger.common.Result;
 import com.simon.ledger.dto.req.InviteCreateReq;
 import com.simon.ledger.dto.req.InviteRegenerateReq;
 import com.simon.ledger.dto.resp.InviteResp;
+import com.simon.ledger.dto.resp.InviteJoinResp;
 import com.simon.ledger.service.IdempotencyService;
 import com.simon.ledger.service.InviteService;
 import io.swagger.v3.oas.annotations.Operation;
@@ -72,7 +73,7 @@ public class InviteController {
 
     @Operation(summary = "加入账本")
     @PostMapping("/api/invites/{code}/join")
-    public Result<InviteResp> join(
+    public Result<InviteJoinResp> join(
             @PathVariable String code,
             @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey
     ) {
@@ -80,7 +81,7 @@ public class InviteController {
                 idempotencyKey,
                 "POST",
                 "/api/invites/" + code + "/join",
-                InviteResp.class,
+                InviteJoinResp.class,
                 () -> inviteService.join(code)
         ));
     }
