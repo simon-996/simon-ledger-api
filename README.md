@@ -108,6 +108,8 @@ GET    /api/ledgers/{ledgerUuid}/stats/people-balances
 GET    /api/ledgers/{ledgerUuid}/changes
 ```
 
+`POST /api/invites/{code}/join` 的 `data` 保留旧版邀请字段，并额外返回 `invite`、`ledger`、`member` 和 `person` 快照。服务端在同一事务中完成成员加入/恢复、按 `ledger_id + linked_user_id` 创建或复用参与人、版本更新和邀请码次数变更；已处于 active 的成员重复加入不会再次消耗次数。客户端应使用新的 `Idempotency-Key` 表示一次显式加入尝试，并优先使用快照恢复本地缓存。
+
 后台管理接口：
 
 ```text
