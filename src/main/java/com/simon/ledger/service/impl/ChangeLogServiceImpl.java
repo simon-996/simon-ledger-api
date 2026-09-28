@@ -102,11 +102,13 @@ public class ChangeLogServiceImpl implements ChangeLogService {
                 .gt(LedgerChangeLog::getVersion, afterVersion == null ? 0 : afterVersion)
                 .orderByAsc(LedgerChangeLog::getVersion));
         Map<Long, UserAccount> userMap = userMap(logs);
-        return logs.stream().map(log -> toResp(ledger, log, userMap.get(log.getOperatorUserId()))).toList();
+        return logs.stream().map(log -> toResp(ledger, log,
+                log.getOperatorUserId() == null ? null : userMap.get(log.getOperatorUserId()))).toList();
     }
 
     private Map<Long, UserAccount> userMap(List<LedgerChangeLog> logs) {
-        List<Long> userIds = logs.stream().map(LedgerChangeLog::getOperatorUserId).distinct().toList();
+        List<Long> userIds = logs.stream().map(LedgerChangeLog::getOperatorUserId)
+                .filter(java.util.Objects::nonNull).distinct().toList();
         if (userIds.isEmpty()) {
             return Map.of();
         }

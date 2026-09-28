@@ -636,7 +636,8 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
         resp.setCreatedByNickname(userNickname(userMap, transaction.getCreatedByUserId()));
         resp.setCreatedByAvatar(userAvatar(userMap, transaction.getCreatedByUserId()));
         resp.setLastModifiedByUserUuid(userUuid(userMap, transaction.getLastModifiedByUserId()));
-        resp.setLastModifiedByNickname(userNickname(userMap, transaction.getLastModifiedByUserId()));
+        resp.setLastModifiedByNickname(transaction.getLastModifiedByUserId() == null
+                ? null : userNickname(userMap, transaction.getLastModifiedByUserId()));
         resp.setLastModifiedByAvatar(userAvatar(userMap, transaction.getLastModifiedByUserId()));
         resp.setClientOperationId(transaction.getClientOperationId());
         resp.setVersion(transaction.getVersion());
@@ -689,16 +690,25 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
     }
 
     private String userUuid(Map<Long, UserAccount> userMap, Long userId) {
+        if (userId == null) {
+            return null;
+        }
         UserAccount user = userMap.get(userId);
         return user == null ? null : user.getUuid();
     }
 
     private String userNickname(Map<Long, UserAccount> userMap, Long userId) {
+        if (userId == null) {
+            return "已注销用户";
+        }
         UserAccount user = userMap.get(userId);
         return user == null ? null : user.getNickname();
     }
 
     private String userAvatar(Map<Long, UserAccount> userMap, Long userId) {
+        if (userId == null) {
+            return null;
+        }
         UserAccount user = userMap.get(userId);
         return user == null ? null : user.getAvatar();
     }
