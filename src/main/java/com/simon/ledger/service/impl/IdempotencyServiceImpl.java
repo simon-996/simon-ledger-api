@@ -22,6 +22,7 @@ import java.util.function.Supplier;
 public class IdempotencyServiceImpl implements IdempotencyService {
 
     private static final int PROCESSING_CODE = -1;
+    private static final int INVALIDATED_CODE = -2;
     private static final int SUCCESS_CODE = 0;
     private static final int MAX_REQUEST_KEY_LENGTH = 128;
 
@@ -67,6 +68,7 @@ public class IdempotencyServiceImpl implements IdempotencyService {
         IdempotencyRecord exists = existing(userId, requestKey);
         if (exists != null) {
             ensureSameRequest(exists, method, path);
+            readResponse(exists, Void.class);
             return;
         }
 
@@ -106,6 +108,9 @@ public class IdempotencyServiceImpl implements IdempotencyService {
     }
 
     private <T> T readResponse(IdempotencyRecord record, Class<T> responseType) {
+        if (INVALIDATED_CODE == record.getResponseCode()) {
+            throw new BusinessException(ErrorCode.CONFLICT, "缓存响应已失效，请使用新幂等键重新请求");
+        }
         if (PROCESSING_CODE == record.getResponseCode()) {
             throw new BusinessException(ErrorCode.CONFLICT, "请求正在处理中，请稍后重试");
         }

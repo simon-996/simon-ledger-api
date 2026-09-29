@@ -198,6 +198,27 @@ class AdminAccountDeletionPreviewTests {
         assertEquals("123456789", service().preview("target").getAccount());
     }
 
+    @Test
+    void includesLedgerThatOnlyContainsALinkedParticipant() {
+        UserAccount target = user(1, "target", "Target", 1);
+        Ledger linkedLedger = ledger(50, "linked-only", 2, null);
+        LedgerPerson linkedPerson = new LedgerPerson();
+        linkedPerson.setId(501L);
+        linkedPerson.setUuid("person-501");
+        linkedPerson.setLedgerId(50L);
+        linkedPerson.setLinkedUserId(1L);
+        when(userMapper.selectOne(any())).thenReturn(target);
+        when(memberMapper.selectList(any())).thenReturn(List.of()).thenReturn(List.of());
+        when(ledgerMapper.selectList(any())).thenReturn(List.of()).thenReturn(List.of(linkedLedger));
+        when(personMapper.selectList(any())).thenReturn(List.of(linkedPerson));
+        when(personMapper.selectCount(any())).thenReturn(1L);
+        when(transactionMapper.selectCount(any())).thenReturn(0L);
+
+        AdminAccountDeletionPreviewResp preview = service().preview("target");
+        assertEquals(List.of("linked-only"), preview.getJoinedLedgers().stream()
+                .map(AdminAccountDeletionPreviewResp.LedgerImpact::getUuid).toList());
+    }
+
     private String fingerprintFor(boolean reverseOrder, int memberVersion) {
         UserAccount target = user(1, "target", "Target", 1);
         Ledger first = ledger(10, "first", 1, null);

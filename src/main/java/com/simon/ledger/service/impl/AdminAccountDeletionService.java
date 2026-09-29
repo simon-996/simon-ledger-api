@@ -57,9 +57,12 @@ public class AdminAccountDeletionService {
 
         List<LedgerMember> targetMemberships = ledgerMemberMapper.selectList(Wrappers.<LedgerMember>lambdaQuery()
                 .eq(LedgerMember::getUserId, target.getId()));
+        List<LedgerPerson> linkedPeople = ledgerPersonMapper.selectList(Wrappers.<LedgerPerson>lambdaQuery()
+                .eq(LedgerPerson::getLinkedUserId, target.getId()));
         List<Ledger> owned = ledgerMapper.selectList(Wrappers.<Ledger>lambdaQuery()
                 .eq(Ledger::getOwnerUserId, target.getId()));
         Set<Long> memberLedgerIds = targetMemberships.stream().map(LedgerMember::getLedgerId).collect(Collectors.toSet());
+        linkedPeople.stream().map(LedgerPerson::getLedgerId).forEach(memberLedgerIds::add);
         Map<Long, Ledger> affected = new HashMap<>();
         owned.forEach(ledger -> affected.put(ledger.getId(), ledger));
         if (!memberLedgerIds.isEmpty()) {
@@ -77,11 +80,6 @@ public class AdminAccountDeletionService {
         Map<Long, UserAccount> users = otherUserIds.isEmpty() ? Map.of()
                 : userAccountMapper.selectList(Wrappers.<UserAccount>lambdaQuery().in(UserAccount::getId, otherUserIds))
                         .stream().collect(Collectors.toMap(UserAccount::getId, Function.identity()));
-        List<LedgerPerson> linkedPeople = ledgers.isEmpty() ? List.of()
-                : ledgerPersonMapper.selectList(Wrappers.<LedgerPerson>lambdaQuery()
-                        .in(LedgerPerson::getLedgerId, ledgers.stream().map(Ledger::getId).toList())
-                        .eq(LedgerPerson::getLinkedUserId, target.getId()));
-
         AdminAccountDeletionPreviewResp response = new AdminAccountDeletionPreviewResp();
         response.setUserUuid(target.getUuid());
         response.setNickname(target.getNickname());

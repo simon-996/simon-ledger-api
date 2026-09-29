@@ -24,7 +24,7 @@ Simon Ledger 的后端 API，负责用户登录、云端账本、成员权限、
 - 邀请：查询当前邀请码、重新生成邀请码、预览邀请、加入账本。
 - 统计：汇总、分类统计、人员结余和代付结算。
 - 同步：写接口支持幂等 key，变更写入 `ledger_change_log` 并提供增量查询。
-- 后台：提供独立 `/api/admin/*` 管理接口，用于运营总览、用户/账本查询、审计日志和系统健康检查。
+- 后台：提供独立 `/api/admin/*` 管理接口，用于运营总览、用户/账本查询、账号删除预览与执行、审计日志和系统健康检查。
 
 ## 目录结构
 
@@ -47,7 +47,10 @@ sql/
   003_add_admin_console.sql
   004_add_optimistic_versions.sql
   005_add_transaction_operation_uniqueness.sql
+  006_anonymize_deleted_accounts.sql
 ```
+
+部署账号永久删除接口前，先在目标数据库执行 `sql/006_anonymize_deleted_accounts.sql`。它将 `ledger_transaction.created_by_user_id` 和 `ledger_change_log.operator_user_id` 改为可空，以便保留共享历史流水而移除原账号，并创建短期的会话撤销重试队列表。迁移与新版 API 必须先于新版后台上线。
 
 ## 主要接口
 
@@ -119,12 +122,16 @@ GET  /api/admin/auth/me
 
 GET  /api/admin/dashboard
 GET  /api/admin/users?keyword=&page=&pageSize=
+GET  /api/admin/users/{uuid}/deletion-preview
+DELETE /api/admin/users/{uuid}
 GET  /api/admin/ledgers?keyword=&page=&pageSize=
 GET  /api/admin/audit-logs?page=&pageSize=
 GET  /api/admin/system/health
 ```
 
 后台登录使用独立 `admin_user` 表，登录 ID 使用 `admin:` 前缀与普通 App 用户隔离。除 `POST /api/admin/auth/login` 外，后台接口都需要有效后台登录态。
+
+账号删除请求需携带预览返回的 `fingerprint`、与路径相同的 `confirmUuid`，以及每本转交账本的 `successors: [{ledgerUuid, userUuid}]`。服务端会重新校验预览和接手人，并在一个事务内处理账本、参与人、流水引用和账号；成功后撤销原账号会话。撤销暂时失败时，`account_session_revocation_queue` 保留内部登录 ID 供定时重试，成功后移除；普通 App 接口同时会拒绝已删除账号的旧 token。其他成员可能缓存了旧账号资料的幂等响应会失效，同一幂等键返回冲突，需在确认当前数据后换新键操作。仅云端在线数据库和活动会话属于这次清理范围，离线设备、备份和历史服务器日志不随请求即时清除。
 
 Swagger:
 
@@ -198,6 +205,8 @@ HAVING COUNT(*) > 1;
 mvn test
 mvn spring-boot:run
 ```
+
+可选的 `AdminAccountDeletionMySqlIntegrationTests` 会清空测试库中的账本和账号表；只能对一次性 MySQL 实例运行。先创建名为 `simon_ledger_integration` 的独立库，用 `001`、`003`、`006` 的 DDL 初始化（将脚本中的库名替换为测试库名），然后设置 `LEDGER_DELETION_TEST_DB_URL`、`LEDGER_DELETION_TEST_DB_USER`、`LEDGER_DELETION_TEST_DB_PASSWORD` 并执行 `mvn -Dtest=AdminAccountDeletionMySqlIntegrationTests test`。未设置 URL 时，普通 `mvn test` 会跳过这组破坏性集成测试。
 
 ## Docker
 

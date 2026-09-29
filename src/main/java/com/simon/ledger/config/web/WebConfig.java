@@ -3,7 +3,12 @@ package com.simon.ledger.config.web;
 import cn.dev33.satoken.interceptor.SaInterceptor;
 import cn.dev33.satoken.router.SaRouter;
 import cn.dev33.satoken.stp.StpUtil;
+import com.simon.ledger.common.ErrorCode;
+import com.simon.ledger.common.exception.BusinessException;
+import com.simon.ledger.entity.UserAccount;
+import com.simon.ledger.mapper.UserAccountMapper;
 import jakarta.servlet.http.HttpServletRequest;
+import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -19,7 +24,10 @@ import java.util.Arrays;
 import java.util.List;
 
 @Configuration
+@RequiredArgsConstructor
 public class WebConfig implements WebMvcConfigurer {
+
+    private final UserAccountMapper userAccountMapper;
 
     @Value("${sa-token.token-name:Authorization}")
     private String tokenName;
@@ -56,6 +64,9 @@ public class WebConfig implements WebMvcConfigurer {
                         return;
                     }
                     StpUtil.checkLogin();
+                    if (!isAdminRequest()) {
+                        requireExistingAccount();
+                    }
                 })))
                 .addPathPatterns("/**")
                 .excludePathPatterns(
@@ -86,5 +97,26 @@ public class WebConfig implements WebMvcConfigurer {
             path = path.substring(contextPath.length());
         }
         return path.matches("^/api/invites/[^/]+$");
+    }
+
+    private boolean isAdminRequest() {
+        ServletRequestAttributes attributes = (ServletRequestAttributes) RequestContextHolder.getRequestAttributes();
+        return attributes != null && attributes.getRequest().getServletPath().startsWith("/api/admin/");
+    }
+
+    private void requireExistingAccount() {
+        Long userId;
+        try {
+            userId = Long.valueOf(StpUtil.getLoginId().toString());
+        } catch (NumberFormatException exception) {
+            throw new BusinessException(ErrorCode.UNAUTHORIZED, "普通账号登录态无效");
+        }
+        UserAccount account = userAccountMapper.selectById(userId);
+        if (account == null || account.getDeletedAt() != null) {
+            throw new BusinessException(ErrorCode.UNAUTHORIZED, "用户不存在或已删除");
+        }
+        if (!Integer.valueOf(1).equals(account.getStatus())) {
+            throw new BusinessException(ErrorCode.FORBIDDEN, "账号已禁用");
+        }
     }
 }

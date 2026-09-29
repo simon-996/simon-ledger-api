@@ -2,6 +2,7 @@ package com.simon.ledger.controller;
 
 import com.simon.ledger.common.Result;
 import com.simon.ledger.dto.req.AdminLoginReq;
+import com.simon.ledger.dto.req.AdminAccountDeletionReq;
 import com.simon.ledger.dto.resp.AdminAuditLogResp;
 import com.simon.ledger.dto.resp.AdminAccountDeletionPreviewResp;
 import com.simon.ledger.dto.resp.AdminDashboardResp;
@@ -13,11 +14,13 @@ import com.simon.ledger.dto.resp.AdminUserResp;
 import com.simon.ledger.dto.resp.PageResp;
 import com.simon.ledger.service.AdminService;
 import com.simon.ledger.service.impl.AdminAccountDeletionService;
+import com.simon.ledger.service.impl.AdminAccountDeletionExecutor;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -33,6 +36,7 @@ public class AdminController {
 
     private final AdminService adminService;
     private final AdminAccountDeletionService accountDeletionService;
+    private final AdminAccountDeletionExecutor accountDeletionExecutor;
 
     @Operation(summary = "后台登录")
     @PostMapping("/auth/login")
@@ -73,6 +77,13 @@ public class AdminController {
     @GetMapping("/users/{uuid}/deletion-preview")
     public Result<AdminAccountDeletionPreviewResp> deletionPreview(@PathVariable String uuid) {
         return Result.ok(accountDeletionService.preview(uuid));
+    }
+
+    @Operation(summary = "永久删除云端账号")
+    @DeleteMapping("/users/{uuid}")
+    public Result<Void> deleteUser(@PathVariable String uuid, @Valid @RequestBody AdminAccountDeletionReq req) {
+        accountDeletionExecutor.delete(uuid, req);
+        return Result.ok();
     }
 
     @Operation(summary = "后台账本列表")

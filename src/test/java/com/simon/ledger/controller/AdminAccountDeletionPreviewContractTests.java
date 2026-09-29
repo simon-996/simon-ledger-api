@@ -48,7 +48,7 @@ class AdminAccountDeletionPreviewContractTests {
         joined.setDeleted(true);
         preview.getJoinedLedgers().add(joined);
         when(deletionService.preview("user-uuid")).thenReturn(preview);
-        MockMvc mvc = MockMvcBuilders.standaloneSetup(new AdminController(adminService, deletionService)).build();
+        MockMvc mvc = MockMvcBuilders.standaloneSetup(new AdminController(adminService, deletionService, null)).build();
 
         mvc.perform(get("/api/admin/users/user-uuid/deletion-preview"))
                 .andExpect(status().isOk())
