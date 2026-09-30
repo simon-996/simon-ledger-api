@@ -15,6 +15,8 @@ public class AdminUserRecordResp {
 
     private Integer status;
 
+    private Boolean aiBookkeepingEnabled;
+
     private Long ledgerCount;
 
     private Long joinedCount;

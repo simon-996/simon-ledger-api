@@ -25,6 +25,7 @@ Simon Ledger 的后端 API，负责用户登录、云端账本、成员权限、
 - 统计：汇总、分类统计、人员结余和代付结算。
 - 同步：写接口支持幂等 key，变更写入 `ledger_change_log` 并提供增量查询。
 - 后台：提供独立 `/api/admin/*` 管理接口，用于运营总览、用户/账本查询、账号删除预览与执行、审计日志和系统健康检查。
+- AI 记账：后台逐用户授权，云端账本写入成员可将文字或短语音转换为待复核草稿；API 不自动创建流水。
 
 ## 目录结构
 
@@ -48,9 +49,14 @@ sql/
   004_add_optimistic_versions.sql
   005_add_transaction_operation_uniqueness.sql
   006_anonymize_deleted_accounts.sql
+  007_add_ai_bookkeeping_access.sql
 ```
 
 部署账号永久删除接口前，先在目标数据库执行 `sql/006_anonymize_deleted_accounts.sql`。它将 `ledger_transaction.created_by_user_id` 和 `ledger_change_log.operator_user_id` 改为可空，以便保留共享历史流水而移除原账号，并创建短期的会话撤销重试队列表。迁移与新版 API 必须先于新版后台上线。
+
+部署 AI 记账前，先在目标数据库执行 `sql/007_add_ai_bookkeeping_access.sql`，现有及新账号默认无权使用。密钥只在 API 服务器部署环境中设置：`DEEPSEEK_API_KEY`、`TENCENT_ASR_SECRET_ID`、`TENCENT_ASR_SECRET_KEY`。可选 `DEEPSEEK_MODEL`，默认为 `deepseek-flash`。请使用部署平台的 Secret/环境变量管理与轮换功能；不要写入配置文件、Git、后台页面或 Flutter 构建参数。缺少 DeepSeek 密钥时文字及语音能力均不可用；缺少腾讯密钥时仅语音能力不可用。测试不调用付费供应商。
+
+AI 调用使用 Redis 按上海自然日限额，默认每用户每日各 30 次文字解析和语音转写、全局各 1000 次，可通过 `ledger.ai.daily-user-limit` 与 `ledger.ai.daily-global-limit` 配置。Redis 不可用时请求拒绝而不放行。语音仅接受 16 kHz、单声道、16-bit PCM；最长 60 秒，Base64 后不超过 3 MB；音频仅在请求内存中使用，不上传对象存储。文字最多 1000 个 Unicode 字符，一次最多返回 10 条草稿。真实设备的麦克风权限提示与录音格式须在发布前另行验收。
 
 ## 主要接口
 
@@ -109,6 +115,10 @@ GET    /api/ledgers/{ledgerUuid}/stats/categories
 GET    /api/ledgers/{ledgerUuid}/stats/people-balances
 
 GET    /api/ledgers/{ledgerUuid}/changes
+
+GET    /api/ledgers/{ledgerUuid}/ai-bookkeeping/capability
+POST   /api/ledgers/{ledgerUuid}/ai-bookkeeping/parse
+POST   /api/ledgers/{ledgerUuid}/ai-bookkeeping/transcribe
 ```
 
 `POST /api/invites/{code}/join` 的 `data` 保留旧版邀请字段，并额外返回 `invite`、`ledger`、`member` 和 `person` 快照。服务端在同一事务中完成成员加入/恢复、按 `ledger_id + linked_user_id` 创建或复用参与人、版本更新和邀请码次数变更；已处于 active 的成员重复加入不会再次消耗次数。客户端应使用新的 `Idempotency-Key` 表示一次显式加入尝试，并优先使用快照恢复本地缓存。
@@ -122,6 +132,7 @@ GET  /api/admin/auth/me
 
 GET  /api/admin/dashboard
 GET  /api/admin/users?keyword=&page=&pageSize=
+PUT  /api/admin/users/{uuid}/ai-bookkeeping-access
 GET  /api/admin/users/{uuid}/deletion-preview
 DELETE /api/admin/users/{uuid}
 GET  /api/admin/ledgers?keyword=&page=&pageSize=

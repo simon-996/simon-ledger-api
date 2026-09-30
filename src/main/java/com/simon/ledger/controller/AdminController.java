@@ -3,6 +3,7 @@ package com.simon.ledger.controller;
 import com.simon.ledger.common.Result;
 import com.simon.ledger.dto.req.AdminLoginReq;
 import com.simon.ledger.dto.req.AdminAccountDeletionReq;
+import com.simon.ledger.dto.req.AdminAiAccessReq;
 import com.simon.ledger.dto.resp.AdminAuditLogResp;
 import com.simon.ledger.dto.resp.AdminAccountDeletionPreviewResp;
 import com.simon.ledger.dto.resp.AdminDashboardResp;
@@ -22,6 +23,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -71,6 +73,13 @@ public class AdminController {
             @RequestParam(required = false) Integer pageSize
     ) {
         return Result.ok(adminService.users(keyword, page, pageSize));
+    }
+
+    @Operation(summary = "设置用户 AI 记账权限")
+    @PutMapping("/users/{uuid}/ai-bookkeeping-access")
+    public Result<Void> setAiBookkeepingAccess(@PathVariable String uuid, @Valid @RequestBody AdminAiAccessReq req) {
+        adminService.setAiBookkeepingAccess(uuid, req.getEnabled());
+        return Result.ok();
     }
 
     @Operation(summary = "账号删除预览")

@@ -40,6 +40,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 import org.springframework.web.context.request.RequestContextHolder;
 import org.springframework.web.context.request.ServletRequestAttributes;
@@ -147,6 +148,25 @@ public class AdminServiceImpl extends ServiceImpl<AdminUserMapper, AdminUser> im
     }
 
     @Override
+    @Transactional
+    public void setAiBookkeepingAccess(String uuid, boolean enabled) {
+        AdminUser admin = currentAdmin();
+        UserAccount user = userAccountMapper.selectOne(Wrappers.<UserAccount>lambdaQuery()
+                .eq(UserAccount::getUuid, uuid)
+                .isNull(UserAccount::getDeletedAt));
+        if (user == null) {
+            throw new BusinessException(ErrorCode.NOT_FOUND, "用户不存在");
+        }
+        if (Boolean.TRUE.equals(user.getAiBookkeepingEnabled()) == enabled) {
+            return;
+        }
+        user.setAiBookkeepingEnabled(enabled);
+        userAccountMapper.updateById(user);
+        recordOperation(admin.getId(), enabled ? "ai_bookkeeping_grant" : "ai_bookkeeping_revoke",
+                "user_account", uuid, enabled ? "授权 AI 记账" : "撤销 AI 记账授权");
+    }
+
+    @Override
     public PageResp<AdminLedgerRecordResp> ledgers(String keyword, Integer page, Integer pageSize) {
         currentAdmin();
         LambdaQueryWrapper<Ledger> wrapper = Wrappers.<Ledger>lambdaQuery()
@@ -230,6 +250,7 @@ public class AdminServiceImpl extends ServiceImpl<AdminUserMapper, AdminUser> im
         resp.setNickname(user.getNickname());
         resp.setAccount(account(user));
         resp.setStatus(user.getStatus());
+        resp.setAiBookkeepingEnabled(Boolean.TRUE.equals(user.getAiBookkeepingEnabled()));
         resp.setLedgerCount(ledgerMapper.selectCount(Wrappers.<Ledger>lambdaQuery()
                 .eq(Ledger::getOwnerUserId, user.getId())
                 .isNull(Ledger::getDeletedAt)));

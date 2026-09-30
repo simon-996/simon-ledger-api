@@ -30,6 +30,8 @@ public class UserAccount {
 
     private Integer status;
 
+    private Boolean aiBookkeepingEnabled;
+
     private Integer version = 1;
 
     @TableField(fill = FieldFill.INSERT)

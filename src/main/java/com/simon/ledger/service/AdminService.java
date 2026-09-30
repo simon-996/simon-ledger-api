@@ -22,6 +22,8 @@ public interface AdminService {
 
     PageResp<AdminUserRecordResp> users(String keyword, Integer page, Integer pageSize);
 
+    void setAiBookkeepingAccess(String uuid, boolean enabled);
+
     PageResp<AdminLedgerRecordResp> ledgers(String keyword, Integer page, Integer pageSize);
 
     PageResp<AdminAuditLogResp> auditLogs(Integer page, Integer pageSize);
