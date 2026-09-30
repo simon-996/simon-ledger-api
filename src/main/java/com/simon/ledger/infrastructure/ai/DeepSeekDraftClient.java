@@ -4,7 +4,9 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.simon.ledger.common.ErrorCode;
 import com.simon.ledger.common.exception.BusinessException;
-import lombok.RequiredArgsConstructor;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.net.URI;
@@ -16,8 +18,8 @@ import java.time.ZoneId;
 import java.util.Map;
 
 @Component
-@RequiredArgsConstructor
 public class DeepSeekDraftClient {
+    private static final Logger log = LoggerFactory.getLogger(DeepSeekDraftClient.class);
     private static final URI ENDPOINT = URI.create("https://api.deepseek.com/responses");
     private static final String SCHEMA = """
             {"type":"object","properties":{"entries":{"type":"array","minItems":1,"maxItems":10,
@@ -27,10 +29,22 @@ public class DeepSeekDraftClient {
             "categorySuggestion":{"type":["string","null"]},"note":{"type":["string","null"]},
             "happenedAt":{"type":["string","null"]},"payerName":{"type":["string","null"]},
             "personNames":{"type":"array","items":{"type":"string"}}},
-            "required":["type","amount","currencyCode"]}},"required":["entries"]}
+            "required":["type","amount","currencyCode"]}}},"required":["entries"]}
             """;
     private final AiProviderConfig config;
     private final ObjectMapper mapper;
+    private final HttpClient httpClient;
+
+    @Autowired
+    public DeepSeekDraftClient(AiProviderConfig config, ObjectMapper mapper) {
+        this(config, mapper, HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build());
+    }
+
+    DeepSeekDraftClient(AiProviderConfig config, ObjectMapper mapper, HttpClient httpClient) {
+        this.config = config;
+        this.mapper = mapper;
+        this.httpClient = httpClient;
+    }
 
     public String parse(String text, ZoneId zone, String currency) {
         if (!config.textAvailable()) {
@@ -51,13 +65,14 @@ public class DeepSeekDraftClient {
                     .timeout(Duration.ofSeconds(25))
                     .POST(HttpRequest.BodyPublishers.ofString(body))
                     .build();
-            HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
-            HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() != 200) {
-                throw unavailable();
+                log.warn("DeepSeek request returned status={}", response.statusCode());
+                throw unavailable(response.statusCode());
             }
             JsonNode payload = mapper.readTree(response.body());
             if (!"completed".equals(payload.path("status").asText())) {
+                log.warn("DeepSeek response was not completed status={}", payload.path("status").asText("missing"));
                 throw unavailable();
             }
             JsonNode output = payload.path("output");
@@ -72,18 +87,30 @@ public class DeepSeekDraftClient {
                     }
                 }
             }
+            log.warn("DeepSeek response did not contain usable output");
             throw unavailable();
         } catch (BusinessException exception) {
             throw exception;
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
+            log.warn("DeepSeek request interrupted");
             throw unavailable();
         } catch (Exception exception) {
+            log.warn("DeepSeek request failed type={}", exception.getClass().getName());
             throw unavailable();
         }
     }
 
     private BusinessException unavailable() {
         return new BusinessException(ErrorCode.SYSTEM_ERROR, "AI 解析暂不可用，请稍后重试");
+    }
+
+    private BusinessException unavailable(int status) {
+        return switch (status) {
+            case 401 -> new BusinessException(ErrorCode.SYSTEM_ERROR, "AI 配置无效，请检查服务端 DeepSeek API Key");
+            case 402 -> new BusinessException(ErrorCode.SYSTEM_ERROR, "AI 服务余额不足，请检查 DeepSeek 账户");
+            case 429 -> new BusinessException(ErrorCode.SYSTEM_ERROR, "AI 服务请求过于频繁，请稍后重试");
+            default -> unavailable();
+        };
     }
 }
