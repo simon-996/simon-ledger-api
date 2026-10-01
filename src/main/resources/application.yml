@@ -33,4 +33,4 @@ ledger:
     daily-user-limit: 30
     daily-global-limit: 1000
   web:
-    allowed-origin-patterns: http://localhost:*,http://127.0.0.1:*,https://ledger.simon996.com,https://admin-ledger.simon996.com
+    allowed-origin-patterns: http://localhost:*,http://127.0.0.1:*,https://ledger.simon996.com,https://admin-ledger.simon996.com,https://ladmin.simon996.com

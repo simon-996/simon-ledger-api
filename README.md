@@ -236,6 +236,29 @@ docker run --rm -p 18080:18080 \
   simon-ledger-api:latest
 ```
 
+## 生产跨域配置
+
+管理后台 `https://ladmin.simon996.com` 请求 API `https://ledger-api.simon996.com` 时，API 必须允许后台的 Origin。生产配置示例：
+
+```yaml
+ledger:
+  web:
+    allowed-origin-patterns: https://ledger.simon996.com,https://admin-ledger.simon996.com,https://ladmin.simon996.com
+```
+
+也可设置环境变量 `LEDGER_WEB_ALLOWED_ORIGIN_PATTERNS`，值为上面的逗号分隔域名列表。如果服务器的 `application-prod.yml` 或环境变量覆盖了默认配置，需要同步添加新域名。Origin 不包含末尾 `/` 或路径；使用明确域名列表。修改后重启 API（Docker 环境变量变更需要重新创建容器）。
+
+部署后验证浏览器登录请求的预检：
+
+```bash
+curl -i -X OPTIONS 'https://ledger-api.simon996.com/api/admin/auth/login' \
+  -H 'Origin: https://ladmin.simon996.com' \
+  -H 'Access-Control-Request-Method: POST' \
+  -H 'Access-Control-Request-Headers: content-type,simon-ledger'
+```
+
+应返回 `200`，且包含 `Access-Control-Allow-Origin: https://ladmin.simon996.com`。仅健康检查返回 `200` 不能验证跨域配置。
+
 ## Git
 
 - Remote: `git@github.com:simon-996/simon-ledger-api.git`

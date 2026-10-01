@@ -39,4 +39,4 @@ ledger:
   # DEEPSEEK_API_KEY, TENCENT_ASR_SECRET_ID, TENCENT_ASR_SECRET_KEY.
   # Leave their values out of this file.
   web:
-    allowed-origin-patterns: https://ledger.simon996.com,https://admin-ledger.simon996.com
+    allowed-origin-patterns: https://ledger.simon996.com,https://admin-ledger.simon996.com,https://ladmin.simon996.com
