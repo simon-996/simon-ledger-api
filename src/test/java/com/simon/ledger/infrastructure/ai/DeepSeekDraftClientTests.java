@@ -8,7 +8,9 @@ import java.io.IOException;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.http.HttpHeaders;
 import java.time.ZoneId;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -30,6 +32,8 @@ class DeepSeekDraftClientTests {
         HttpClient http = mock(HttpClient.class);
         HttpResponse<String> response = mock(HttpResponse.class);
         when(response.statusCode()).thenReturn(200);
+        when(response.headers()).thenReturn(HttpHeaders.of(
+                Map.of("x-request-id", List.of("deepseek-request-123")), (name, value) -> true));
         when(response.body()).thenReturn("{\"status\":\"private-description-and-key\"}");
         doReturn(response).when(http).send(any(), any());
         var client = new DeepSeekDraftClient(new AiProviderConfig("test-key", "deepseek-flash", "", ""),
@@ -49,7 +53,40 @@ class DeepSeekDraftClientTests {
             assertThrows(BusinessException.class, () -> client.parse("private-description-and-key",
                     ZoneId.of("Asia/Shanghai"), "CNY"));
             assertFalse(messages.isEmpty(), "test must capture provider failure log");
-            assertFalse(String.join("\n", messages).contains("private-description-and-key"));
+            String logs = String.join("\n", messages);
+            assertFalse(logs.contains("private-description-and-key"));
+            org.junit.jupiter.api.Assertions.assertTrue(logs.contains("status=200"));
+            org.junit.jupiter.api.Assertions.assertTrue(logs.contains("requestId=deepseek-request-123"));
+        } finally {
+            logger.removeAppender(appender);
+            logger.setAdditive(previousAdditive);
+            logger.setLevel(previousLevel);
+            appender.stop();
+        }
+    }
+
+    @Test
+    void providerConfigurationLogsPresenceWithoutLoggingSecrets() {
+        List<String> messages = new ArrayList<>();
+        var appender = new AbstractAppender("provider-config-privacy-test", null,
+                PatternLayout.createDefaultLayout(), false, null) {
+            @Override public void append(LogEvent event) { messages.add(event.getMessage().getFormattedMessage()); }
+        };
+        Logger logger = (Logger) LogManager.getLogger(AiProviderConfig.class);
+        var previousLevel = logger.getLevel();
+        var previousAdditive = logger.isAdditive();
+        logger.setAdditive(false);
+        appender.start();
+        logger.addAppender(appender);
+        logger.setLevel(Level.ALL);
+        try {
+            new AiProviderConfig("deepseek-private-key", "deepseek-flash", "tencent-private-id", "tencent-private-key");
+            String logs = String.join("\n", messages);
+            org.junit.jupiter.api.Assertions.assertTrue(logs.contains("deepSeekConfigured=true"));
+            org.junit.jupiter.api.Assertions.assertTrue(logs.contains("tencentAsrConfigured=true"));
+            assertFalse(logs.contains("deepseek-private-key"));
+            assertFalse(logs.contains("tencent-private-id"));
+            assertFalse(logs.contains("tencent-private-key"));
         } finally {
             logger.removeAppender(appender);
             logger.setAdditive(previousAdditive);
@@ -76,6 +113,7 @@ class DeepSeekDraftClientTests {
         HttpClient http = mock(HttpClient.class);
         HttpResponse<String> response = mock(HttpResponse.class);
         when(response.statusCode()).thenReturn(401);
+        when(response.headers()).thenReturn(HttpHeaders.of(Map.of(), (name, value) -> true));
         when(response.body()).thenReturn("{\"error\":{\"message\":\"secret provider detail\"}}");
         doReturn(response).when(http).send(any(), any());
         DeepSeekDraftClient client = new DeepSeekDraftClient(

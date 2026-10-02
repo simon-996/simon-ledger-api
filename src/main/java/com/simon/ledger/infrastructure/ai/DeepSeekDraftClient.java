@@ -87,12 +87,14 @@ public class DeepSeekDraftClient {
                     .build();
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() != 200) {
-                log.warn("DeepSeek request returned status={}", response.statusCode());
+                log.warn("DeepSeek request failed status={} requestId={}", response.statusCode(),
+                        AiDiagnosticLog.safeIdentifier(response.headers().firstValue("x-request-id").orElse(null)));
                 throw unavailable(response.statusCode());
             }
             JsonNode payload = mapper.readTree(response.body());
             if (!"completed".equals(payload.path("status").asText())) {
-                log.warn("DeepSeek response was not completed");
+                log.warn("DeepSeek response was not completed status={} requestId={}", response.statusCode(),
+                        AiDiagnosticLog.safeIdentifier(response.headers().firstValue("x-request-id").orElse(null)));
                 throw unavailable();
             }
             JsonNode output = payload.path("output");
@@ -107,7 +109,9 @@ public class DeepSeekDraftClient {
                     }
                 }
             }
-            log.warn("DeepSeek response did not contain usable output");
+            log.warn("DeepSeek response did not contain usable output status={} requestId={}",
+                    response.statusCode(),
+                    AiDiagnosticLog.safeIdentifier(response.headers().firstValue("x-request-id").orElse(null)));
             throw unavailable();
         } catch (BusinessException exception) {
             throw exception;
