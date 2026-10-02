@@ -23,5 +23,17 @@ public class AiDraftResp {
         private String payerPersonUuid;
         private List<String> personUuids = new ArrayList<>();
         private List<String> unresolvedNames = new ArrayList<>();
+        private String paymentMode = "unconfirmed";
+        private List<PersonMatch> personMatches = new ArrayList<>();
+    }
+
+    @Data
+    public static class PersonMatch {
+        private String sourceName;
+        private String role;
+        private String personUuid;
+        private String matchedName;
+        private boolean approximate;
+        private List<String> candidatePersonUuids = new ArrayList<>();
     }
 }

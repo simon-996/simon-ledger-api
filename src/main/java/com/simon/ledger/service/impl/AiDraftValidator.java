@@ -7,6 +7,7 @@ import com.simon.ledger.common.exception.BusinessException;
 import com.simon.ledger.dto.resp.AiDraftResp;
 import com.simon.ledger.entity.Ledger;
 import com.simon.ledger.entity.LedgerPerson;
+import com.simon.ledger.infrastructure.ai.AiCategoryContext;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
@@ -26,6 +27,13 @@ public class AiDraftValidator {
 
     public AiDraftResp validate(String providerJson, Ledger ledger, Long userId, ZoneId zone,
                                 List<LedgerPerson> people) {
+        return validate(providerJson, ledger, userId, zone, people, AiCategoryContext.defaults());
+    }
+
+    public AiDraftResp validate(String providerJson, Ledger ledger, Long userId, ZoneId zone,
+                                List<LedgerPerson> people, AiCategoryContext categories) {
+        List<LedgerPerson> active = AiPersonMatcher.activePeople(ledger.getId(), people);
+        AiPersonMatcher matcher = new AiPersonMatcher();
         final JsonNode root;
         try {
             root = mapper.readTree(providerJson);
@@ -39,7 +47,9 @@ public class AiDraftValidator {
         AiDraftResp response = new AiDraftResp();
         for (JsonNode raw : entries) {
             AiDraftResp.Entry entry = new AiDraftResp.Entry();
-            int type = raw.path("type").asInt(-1);
+            JsonNode typeNode = raw.path("type");
+            if (!typeNode.isIntegralNumber() || !typeNode.canConvertToInt()) throw invalid();
+            int type = typeNode.intValue();
             if (type != 0 && type != 1) {
                 throw invalid();
             }
@@ -62,7 +72,8 @@ public class AiDraftValidator {
             }
             entry.setCurrencyCode(currency);
             entry.setSourceText(optionalText(raw, "sourceText", 1000));
-            entry.setCategorySuggestion(optionalText(raw, "categorySuggestion", 64));
+            JsonNode category = raw.path("categorySuggestion");
+            entry.setCategorySuggestion(categories.retain(type, category.isTextual() ? category.textValue().strip() : null));
             entry.setNote(optionalText(raw, "note", 512));
             String date = optionalText(raw, "happenedAt", 40);
             if (date != null) {
@@ -83,39 +94,62 @@ public class AiDraftValidator {
                     throw invalid();
                 }
                 for (JsonNode name : names) {
-                    resolve(optionalNodeText(name, 64), userId, people, personUuids,
-                            entry.getUnresolvedNames());
+                    String sourceName = originalName(name);
+                    if (sourceName == null) throw invalid();
+                    var match = matcher.match(sourceName, "participant", userId, active,
+                            suggestedNames(raw, sourceName, "participant"));
+                    addMatch(entry, match);
+                    if (match.getPersonUuid() != null) personUuids.add(match.getPersonUuid());
                 }
             }
             entry.setPersonUuids(List.copyOf(personUuids));
-            String payerName = optionalText(raw, "payerName", 64);
+            JsonNode payerNode = raw.path("payerName");
+            String payerName = payerNode.isMissingNode() || payerNode.isNull() ? null : originalName(payerNode);
             if (payerName != null) {
-                Set<String> payer = new LinkedHashSet<>();
-                resolve(payerName, userId, people, payer, entry.getUnresolvedNames());
-                if (payer.size() == 1) {
-                    entry.setPayerPersonUuid(payer.iterator().next());
-                }
+                var match = matcher.match(payerName, "payer", userId, active,
+                        suggestedNames(raw, payerName, "payer"));
+                addMatch(entry, match);
+                entry.setPayerPersonUuid(match.getPersonUuid());
             }
+            String paymentMode = optionalText(raw, "paymentMode", 64);
+            entry.setPaymentMode(entry.getPayerPersonUuid() != null ? "person"
+                    : "shared_wallet".equals(paymentMode) && payerName == null ? "shared_wallet" : "unconfirmed");
             response.getEntries().add(entry);
         }
         return response;
     }
 
-    private void resolve(String name, Long userId, List<LedgerPerson> people, Set<String> resolved,
-                         List<String> unresolved) {
-        if (name == null) {
-            throw invalid();
+    private void addMatch(AiDraftResp.Entry entry, AiDraftResp.PersonMatch match) {
+        entry.getPersonMatches().add(match);
+        if (match.getPersonUuid() == null && !entry.getUnresolvedNames().contains(match.getSourceName())) {
+            entry.getUnresolvedNames().add(match.getSourceName());
         }
-        List<LedgerPerson> matches = people.stream()
-                .filter(person -> person.getDeletedAt() == null)
-                .filter(person -> "我".equals(name)
-                        ? userId.equals(person.getLinkedUserId()) : name.equals(person.getName()))
-                .toList();
-        if (matches.size() == 1) {
-            resolved.add(matches.get(0).getUuid());
-        } else if (!unresolved.contains(name)) {
-            unresolved.add(name);
+    }
+
+    private String originalName(JsonNode node) {
+        if (!node.isTextual()) throw invalid();
+        String name = node.textValue();
+        if (name.codePointCount(0, name.length()) > 64) throw invalid();
+        return AiPersonMatcher.normalize(name).isEmpty() ? null : name;
+    }
+
+    private List<String> suggestedNames(JsonNode raw, String sourceName, String role) {
+        JsonNode suggestions = raw.path("personSuggestions");
+        if (suggestions.isMissingNode() || suggestions.isNull()) return List.of();
+        if (!suggestions.isArray() || suggestions.size() > 60) throw invalid();
+        Set<String> names = new LinkedHashSet<>();
+        for (JsonNode suggestion : suggestions) {
+            String source = originalName(suggestion.path("sourceName"));
+            String suggestedRole = requiredText(suggestion, "role", 16);
+            if (!"participant".equals(suggestedRole) && !"payer".equals(suggestedRole)) throw invalid();
+            JsonNode candidates = suggestion.path("candidateNames");
+            if (!candidates.isArray() || candidates.size() > 30) throw invalid();
+            for (JsonNode candidate : candidates) {
+                String name = originalName(candidate);
+                if (sourceName.equals(source) && role.equals(suggestedRole) && name != null) names.add(name);
+            }
         }
+        return List.copyOf(names);
     }
 
     private String requiredText(JsonNode raw, String key, int maxLength) {

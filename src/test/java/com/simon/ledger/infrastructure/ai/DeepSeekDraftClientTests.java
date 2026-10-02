@@ -15,8 +15,48 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.Logger;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.layout.PatternLayout;
+import java.util.ArrayList;
+import java.util.List;
 
 class DeepSeekDraftClientTests {
+    @Test
+    void untrustedProviderStatusCannotExposeUserTextOrKeysInLogs() throws Exception {
+        HttpClient http = mock(HttpClient.class);
+        HttpResponse<String> response = mock(HttpResponse.class);
+        when(response.statusCode()).thenReturn(200);
+        when(response.body()).thenReturn("{\"status\":\"private-description-and-key\"}");
+        doReturn(response).when(http).send(any(), any());
+        var client = new DeepSeekDraftClient(new AiProviderConfig("test-key", "deepseek-flash", "", ""),
+                new ObjectMapper(), http);
+        List<String> messages = new ArrayList<>();
+        var appender = new AbstractAppender("privacy-test", null, PatternLayout.createDefaultLayout(), false, null) {
+            @Override public void append(LogEvent event) { messages.add(event.getMessage().getFormattedMessage()); }
+        };
+        Logger logger = (Logger) LogManager.getLogger(DeepSeekDraftClient.class);
+        var previousLevel = logger.getLevel();
+        var previousAdditive = logger.isAdditive();
+        logger.setAdditive(false);
+        appender.start();
+        logger.addAppender(appender);
+        logger.setLevel(Level.ALL);
+        try {
+            assertThrows(BusinessException.class, () -> client.parse("private-description-and-key",
+                    ZoneId.of("Asia/Shanghai"), "CNY"));
+            assertFalse(messages.isEmpty(), "test must capture provider failure log");
+            assertFalse(String.join("\n", messages).contains("private-description-and-key"));
+        } finally {
+            logger.removeAppender(appender);
+            logger.setAdditive(previousAdditive);
+            logger.setLevel(previousLevel);
+            appender.stop();
+        }
+    }
     @Test
     void ioFailureReturnsSafeErrorWithoutInterruptingRequestThread() throws Exception {
         Thread.interrupted();

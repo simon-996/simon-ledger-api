@@ -8,6 +8,7 @@ import com.simon.ledger.dto.resp.AiCapabilityResp;
 import com.simon.ledger.dto.resp.AiDraftResp;
 import com.simon.ledger.entity.LedgerPerson;
 import com.simon.ledger.infrastructure.ai.AiProviderConfig;
+import com.simon.ledger.infrastructure.ai.AiCategoryContext;
 import com.simon.ledger.infrastructure.ai.DeepSeekDraftClient;
 import com.simon.ledger.mapper.LedgerPersonMapper;
 import lombok.RequiredArgsConstructor;
@@ -52,11 +53,15 @@ public class AiBookkeepingService {
         } catch (DateTimeException | NullPointerException exception) {
             throw new BusinessException(ErrorCode.BAD_REQUEST, "时区无效");
         }
-        limiter.consume("parse", context.user().getId());
-        String result = provider.parse(request.getText(), zone, context.ledger().getBaseCurrencyCode());
-        return validator.validate(result, context.ledger(), context.user().getId(), zone,
+        AiCategoryContext categories = new AiCategoryContext(request.getExpenseCategories(), request.getIncomeCategories());
+        var activePeople = AiPersonMatcher.activePeople(context.ledger().getId(),
                 people.selectList(Wrappers.<LedgerPerson>lambdaQuery()
                         .eq(LedgerPerson::getLedgerId, context.ledger().getId())
                         .isNull(LedgerPerson::getDeletedAt)));
+        limiter.consume("parse", context.user().getId());
+        String result = provider.parse(request.getText(), zone, context.ledger().getBaseCurrencyCode(), categories,
+                activePeople.stream().map(LedgerPerson::getName).toList());
+        return validator.validate(result, context.ledger(), context.user().getId(), zone,
+                activePeople, categories);
     }
 }
