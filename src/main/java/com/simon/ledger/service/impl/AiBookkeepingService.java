@@ -24,6 +24,8 @@ public class AiBookkeepingService {
     private final DeepSeekDraftClient provider;
     private final LedgerPersonMapper people;
     private final AiDraftValidator validator;
+    private final AiParsingContextFactory contextFactory;
+    private final AiSemanticDraftValidator semanticValidator;
     private final AiProviderConfig config;
 
     public AiCapabilityResp capability(String ledgerUuid) {
@@ -52,11 +54,23 @@ public class AiBookkeepingService {
         } catch (DateTimeException | NullPointerException exception) {
             throw new BusinessException(ErrorCode.BAD_REQUEST, "时区无效");
         }
+        int schemaVersion = request.getSchemaVersion() == null ? 1 : request.getSchemaVersion();
+        if (schemaVersion != 1 && schemaVersion != 2) {
+            throw new BusinessException(ErrorCode.BAD_REQUEST, "不支持的 AI 草稿版本");
+        }
+        if (schemaVersion == 1) {
+            limiter.consume("parse", context.user().getId());
+            String result = provider.parse(request.getText(), zone, context.ledger().getBaseCurrencyCode());
+            return validator.validate(result, context.ledger(), context.user().getId(), zone,
+                    people.selectList(Wrappers.<LedgerPerson>lambdaQuery()
+                            .eq(LedgerPerson::getLedgerId, context.ledger().getId())
+                            .isNull(LedgerPerson::getDeletedAt)));
+        }
+        var activePeople = people.selectList(Wrappers.<LedgerPerson>lambdaQuery()
+                .eq(LedgerPerson::getLedgerId, context.ledger().getId())
+                .isNull(LedgerPerson::getDeletedAt));
+        var parsingContext = contextFactory.create(context.ledger(), context.user().getId(), zone, request, activePeople);
         limiter.consume("parse", context.user().getId());
-        String result = provider.parse(request.getText(), zone, context.ledger().getBaseCurrencyCode());
-        return validator.validate(result, context.ledger(), context.user().getId(), zone,
-                people.selectList(Wrappers.<LedgerPerson>lambdaQuery()
-                        .eq(LedgerPerson::getLedgerId, context.ledger().getId())
-                        .isNull(LedgerPerson::getDeletedAt)));
+        return semanticValidator.validate(provider.parse(parsingContext), parsingContext);
     }
 }
