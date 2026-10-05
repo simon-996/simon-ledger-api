@@ -95,4 +95,14 @@ class AiBookkeepingContractTests {
                         .contentType(MediaType.APPLICATION_JSON).content("{}"))
                 .andExpect(status().isUnsupportedMediaType());
     }
+
+    @Test
+    void rejectsUnsupportedSemanticDraftVersion() throws Exception {
+        MockMvc mvc = MockMvcBuilders.standaloneSetup(
+                new AiBookkeepingController(service, transcription)).build();
+        mvc.perform(post("/api/ledgers/ledger-1/ai-bookkeeping/parse")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"text\":\"早餐18元\",\"zone\":\"Asia/Shanghai\",\"schemaVersion\":3}"))
+                .andExpect(status().isBadRequest());
+    }
 }

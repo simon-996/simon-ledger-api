@@ -64,7 +64,7 @@ class AiSemanticContextTests {
             return response;
         }).when(http).send(any(), any());
         service = new AiBookkeepingService(access, limiter, new DeepSeekDraftClient(config, mapper, http), people,
-                new AiDraftValidator(mapper), config);
+                new AiDraftValidator(mapper), new AiParsingContextFactory(), new AiSemanticDraftValidator(mapper, new AiSemanticRules()), config);
     }
 
     @Test
