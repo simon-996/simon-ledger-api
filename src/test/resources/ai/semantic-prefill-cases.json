@@ -2072,8 +2072,7 @@
       "happenedAt": null,
       "datePrecision": "DAY",
       "issueCodes": [
-        "DATE_AMBIGUOUS",
-        "PARTICIPANTS_UNSPECIFIED"
+        "DATE_AMBIGUOUS"
       ]
     }
   },
@@ -2423,15 +2422,13 @@
       "categorySuggestion": "居住",
       "paymentMode": "PERSON_PAID",
       "payerPersonUuid": "p-zhang",
-      "participantScope": "SPECIFIED",
-      "personUuids": [
-        "p-zhang",
-        "p-li"
-      ],
+      "participantScope": "UNKNOWN",
+      "personUuids": [],
       "happenedAt": "2026-10-05T00:00:00",
       "datePrecision": "DAY",
       "issueCodes": [
-        "UNSUPPORTED_SPLIT"
+        "UNSUPPORTED_SPLIT",
+        "PARTICIPANTS_UNSPECIFIED"
       ]
     }
   },
@@ -2481,7 +2478,7 @@
       "currencyCode": "CNY",
       "categorySuggestion": "居住",
       "paymentMode": "PERSON_PAID",
-      "payerPersonUuid": "p-zhang",
+      "payerPersonUuid": null,
       "participantScope": "ALL",
       "personUuids": [
         "p-zhang",
@@ -2492,13 +2489,14 @@
       "happenedAt": "2026-10-05T00:00:00",
       "datePrecision": "DAY",
       "issueCodes": [
-        "UNSUPPORTED_SPLIT"
+        "UNSUPPORTED_SPLIT",
+        "PAYER_UNSPECIFIED"
       ]
     }
   },
   {
     "id": "A24-02",
-    "text": "张三付300李四付100的住宿，大家共同承担。",
+    "text": "住宿总计400，张三付300，李四付100，大家共同承担。",
     "scenario": "provider-parse",
     "context": {
       "referenceDate": "2026-10-05",

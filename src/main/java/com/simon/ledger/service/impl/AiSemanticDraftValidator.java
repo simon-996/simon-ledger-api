@@ -119,7 +119,7 @@ public class AiSemanticDraftValidator {
         resolveDate(entry, raw, source, context);
         resolvePayment(entry, raw, source, type, context);
         resolveParticipants(entry, raw, source, context);
-        resolveSplit(entry, raw, source);
+        resolveSplit(entry, raw, source, context);
         return entry;
     }
 
@@ -221,6 +221,11 @@ public class AiSemanticDraftValidator {
         if (sharedEvidence) {
             issue(entry, "paymentMode", "CONFLICTING_FIELDS", payerName, List.of());
         }
+        if (hasMultipleNamedPayers(source, context)) {
+            entry.setPayerPersonUuid(null);
+            issue(entry, "payer", "PAYER_UNSPECIFIED", null, List.of());
+            return;
+        }
         if (payerName == null) {
             issue(entry, "payer", "PAYER_UNSPECIFIED", null, List.of());
             return;
@@ -308,10 +313,11 @@ public class AiSemanticDraftValidator {
         if (selected.isEmpty()) issue(entry, "participants", "PARTICIPANTS_UNSPECIFIED", null, List.of());
     }
 
-    private void resolveSplit(AiDraftResp.Entry entry, JsonNode raw, String source) {
+    private void resolveSplit(AiDraftResp.Entry entry, JsonNode raw, String source,
+                              AiParsingContext context) {
         String split = requiredText(raw, "splitMode", 32);
         if (!List.of("EQUAL", "UNSUPPORTED", "UNKNOWN").contains(split)) throw invalid();
-        if (rules.hasUnsupportedSplitEvidence(source)) {
+        if (rules.hasUnsupportedSplitEvidence(source) || hasMultipleNamedPayers(source, context)) {
             entry.setSplitMode("UNSUPPORTED");
             entry.getFieldSources().put("splitMode", "EXPLICIT");
             issue(entry, "splitMode", "UNSUPPORTED_SPLIT", null, List.of());
@@ -420,6 +426,42 @@ public class AiSemanticDraftValidator {
                 int verbStart = verbAt;
                 if (context.people().stream().anyMatch(person -> hasOnlyThisNamedPayerBefore(
                         source, person.name(), verbStart, context))) return true;
+                verbAt = source.indexOf(verb, verbAt + verb.length());
+            }
+        }
+        return false;
+    }
+
+    private boolean hasMultipleNamedPayers(String source, AiParsingContext context) {
+        Set<String> mentionedNames = new LinkedHashSet<>();
+        for (var person : context.people()) {
+            if (source.contains(person.name())) mentionedNames.add(person.name());
+        }
+        if (mentionedNames.size() > 1 && containsAny(source, "各付", "各自付", "分别付", "分别支付",
+                "分别垫付", "各自垫付", "分别代付", "各自代付", "分别付款", "各自付款")) {
+            return true;
+        }
+
+        Set<String> payers = new LinkedHashSet<>();
+        for (String verb : PAYMENT_VERBS) {
+            int verbAt = source.indexOf(verb);
+            while (verbAt >= 0) {
+                int clauseStart = Math.max(Math.max(source.lastIndexOf('，', verbAt),
+                                source.lastIndexOf(',', verbAt)),
+                        Math.max(source.lastIndexOf('。', verbAt), source.lastIndexOf(';', verbAt)));
+                String preceding = source.substring(Math.max(clauseStart + 1, verbAt - 32), verbAt);
+                String nearestName = null;
+                int nearestNameEnd = -1;
+                for (var person : context.people()) {
+                    int nameAt = preceding.lastIndexOf(person.name());
+                    int nameEnd = nameAt < 0 ? -1 : nameAt + person.name().length();
+                    if (nameEnd > nearestNameEnd) {
+                        nearestName = person.name();
+                        nearestNameEnd = nameEnd;
+                    }
+                }
+                if (nearestName != null) payers.add(nearestName);
+                if (payers.size() > 1) return true;
                 verbAt = source.indexOf(verb, verbAt + verb.length());
             }
         }

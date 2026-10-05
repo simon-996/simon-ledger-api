@@ -61,6 +61,49 @@ class AiSemanticDraftValidatorTests {
     }
 
     @Test
+    void flagsUnequalNamedParticipantSharesInsteadOfLeavingThemAsEqual() throws Exception {
+        var entry = entry("房费400张三垫付，张三承担300李四承担100。");
+        entry.put("paymentMode", "PERSON_PAID");
+        entry.put("payerName", "张三");
+        entry.put("participantScope", "SPECIFIED");
+        entry.put("personNames", List.of("张三", "李四"));
+
+        var draft = validate(entry).getEntries().getFirst();
+
+        assertEquals("UNSUPPORTED", draft.getSplitMode());
+        assertIssue(draft, "splitMode", "UNSUPPORTED_SPLIT");
+    }
+
+    @Test
+    void doesNotChooseOnePayerWhenSeveralPeoplePaidOneEntry() throws Exception {
+        var entry = entry("住宿总计400，张三付300，李四付100，大家共同承担。");
+        entry.put("paymentMode", "PERSON_PAID");
+        entry.put("payerName", "张三");
+        entry.put("participantScope", "ALL");
+
+        var draft = validate(entry).getEntries().getFirst();
+
+        assertNull(draft.getPayerPersonUuid());
+        assertIssue(draft, "payer", "PAYER_UNSPECIFIED");
+        assertEquals("UNSUPPORTED", draft.getSplitMode());
+        assertIssue(draft, "splitMode", "UNSUPPORTED_SPLIT");
+    }
+
+    @Test
+    void keepsAnExplicitPayerWhenOtherPeopleAreMentionedEarlier() throws Exception {
+        var entry = entry("张三和李四住店400张三垫付，所有人都住。");
+        entry.put("paymentMode", "PERSON_PAID");
+        entry.put("payerName", "张三");
+        entry.put("participantScope", "ALL");
+
+        var draft = validate(entry).getEntries().getFirst();
+
+        assertEquals("p-zhang", draft.getPayerPersonUuid());
+        assertFalse(draft.getIssues().stream().anyMatch(issue ->
+                issue.field().equals("payer") && issue.code().equals("PAYER_UNSPECIFIED")));
+    }
+
+    @Test
     void flagsDuplicatePayerAndDoesNotGuessSharedPoolForUnknownMode() throws Exception {
         var duplicateContext = context(List.of(
                 new AiParsingContext.PersonCandidate("p1", "张三", false),

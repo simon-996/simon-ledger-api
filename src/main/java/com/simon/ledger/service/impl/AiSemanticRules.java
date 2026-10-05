@@ -8,9 +8,13 @@ import java.time.format.DateTimeFormatter;
 import java.time.temporal.TemporalAdjusters;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @Component
 public class AiSemanticRules {
+    private static final Pattern ALLOCATION_AMOUNT = Pattern.compile(
+            "(?:承担|分摊|付|支付)了?\\s*(?:\\d+(?:\\.\\d{1,2})?|[零〇一二两三四五六七八九十百千万]+)(?!\\d)");
     private static final Map<String, List<String>> CATEGORY_ALIASES = Map.ofEntries(
             Map.entry("住宿", List.of("住宿", "居住")),
             Map.entry("酒店", List.of("住宿", "居住")),
@@ -85,11 +89,17 @@ public class AiSemanticRules {
     }
 
     public boolean hasUnsupportedSplitEvidence(String source) {
-        if (containsAny(source, "分别承担", "各自承担", "各付", "分别付", "不等额", "按比例", "分成")) {
+        if (containsAny(source, "分别承担", "各自承担", "各付", "分别付", "分别垫付",
+                "各自垫付", "分别代付", "各自代付", "分别付款", "各自付款", "不等额", "按比例", "分成")) {
             return true;
         }
         if (source.matches("(?s).*\\d+(?:\\.\\d+)?\\s*(?:元|块|块钱).+\\d+(?:\\.\\d+)?\\s*(?:元|块|块钱).*")) {
             return true;
+        }
+        Matcher allocationAmounts = ALLOCATION_AMOUNT.matcher(source);
+        int allocationCount = 0;
+        while (allocationAmounts.find()) {
+            if (++allocationCount >= 2) return true;
         }
         return source.matches("(?s).*(?:[零〇一二两三四五六七八九十百千\\d]+)比(?:[零〇一二两三四五六七八九十百千\\d]+).*?");
     }

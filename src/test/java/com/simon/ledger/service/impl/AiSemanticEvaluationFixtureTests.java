@@ -81,6 +81,12 @@ class AiSemanticEvaluationFixtureTests {
         assertEquals("CNY", find(cases, "A22-01").path("context").path("currencyCode").asText());
         assertEquals("MISSING_AMOUNT", find(cases, "A26-01").path("expected").path("failure").asText());
         assertEquals("TOO_MANY_ENTRIES", find(cases, "A36-04").path("expected").path("failure").asText());
+        assertEquals("UNKNOWN", find(cases, "A23-02").path("expected").path("participantScope").asText());
+        assertTrue(contains(find(cases, "A23-02").path("expected").path("issueCodes"),
+                "PARTICIPANTS_UNSPECIFIED"));
+        assertTrue(find(cases, "A24-01").path("expected").path("payerPersonUuid").isNull());
+        assertTrue(contains(find(cases, "A24-02").path("expected").path("issueCodes"),
+                "PAYER_UNSPECIFIED"));
         assertTrue(find(cases, "A25-01").path("expected").path("entries").size() >= 3);
         assertTrue(find(cases, "A25-02").path("expected").path("entries").size() >= 2);
     }

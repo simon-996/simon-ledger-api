@@ -6,6 +6,8 @@ import java.time.LocalDate;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class AiSemanticRulesTests {
     private final AiSemanticRules rules = new AiSemanticRules();
@@ -36,5 +38,14 @@ class AiSemanticRulesTests {
         assertEquals(LocalDate.of(2026, 10, 3), rules.resolveDay("前天", context.referenceDate()));
         assertEquals(LocalDate.of(2026, 10, 3), rules.resolveDay("上周六", context.referenceDate()));
         assertEquals(LocalDate.of(2026, 10, 5), rules.resolveDay("2026-10-05", context.referenceDate()));
+    }
+
+    @Test
+    void recognizesRepeatedPerPersonAmountsWithoutCurrencyUnits() {
+        assertTrue(rules.hasUnsupportedSplitEvidence("张三承担300李四承担100"));
+        assertTrue(rules.hasUnsupportedSplitEvidence("张三承担了300李四承担了100"));
+        assertTrue(rules.hasUnsupportedSplitEvidence("张三付300，李四付100"));
+        assertTrue(rules.hasUnsupportedSplitEvidence("张三和李四分别垫付住宿"));
+        assertFalse(rules.hasUnsupportedSplitEvidence("住宿400，张三垫付，大家使用"));
     }
 }
