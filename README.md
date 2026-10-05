@@ -236,6 +236,21 @@ docker run --rm -p 18080:18080 \
   simon-ledger-api:latest
 ```
 
+## API 服务器部署与 AI 环境变量
+
+服务器部署脚本为 `scripts/deploy-server.sh`，读取 `/apps/simon_ledger/app.tar.gz`，并通过 `--env-file` 将 `/apps/simon_ledger/secrets/api.env` 加载到新容器。可用 `ENV_FILE` 指定其他私有环境文件。环境文件缺失时，脚本会在停止现有容器前退出。
+
+在环境文件中配置 `DEEPSEEK_API_KEY`、`TENCENT_ASR_SECRET_ID`、`TENCENT_ASR_SECRET_KEY`，可选配置 `DEEPSEEK_MODEL`。私有目录权限设为 `700`，环境文件权限设为 `600`。真实密钥由每个部署环境单独维护；`*.env` 已加入 Git 忽略规则。
+
+构建并上传新 `app.tar.gz` 后，安装并执行服务器脚本：
+
+```bash
+scp scripts/deploy-server.sh root@simon996.com:/apps/simon_ledger/scripts/deploy_api.sh
+ssh root@simon996.com 'chmod +x /apps/simon_ledger/scripts/deploy_api.sh && bash /apps/simon_ledger/scripts/deploy_api.sh'
+```
+
+普通容器重启保留环境变量。重新部署会重建容器，因此必须再次使用这个脚本加载环境文件。脚本只替换 API 应用目录，不修改独立的私有环境文件。
+
 ## 生产跨域配置
 
 管理后台 `https://ladmin.simon996.com` 请求 API `https://ledger-api.simon996.com` 时，API 必须允许后台的 Origin。生产配置示例：

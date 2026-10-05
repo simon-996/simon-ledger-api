@@ -8,6 +8,7 @@ import com.simon.ledger.dto.resp.AiCapabilityResp;
 import com.simon.ledger.dto.resp.AiDraftResp;
 import com.simon.ledger.entity.LedgerPerson;
 import com.simon.ledger.infrastructure.ai.AiProviderConfig;
+import com.simon.ledger.infrastructure.ai.AiCategoryContext;
 import com.simon.ledger.infrastructure.ai.DeepSeekDraftClient;
 import com.simon.ledger.mapper.LedgerPersonMapper;
 import lombok.RequiredArgsConstructor;
@@ -58,17 +59,18 @@ public class AiBookkeepingService {
         if (schemaVersion != 1 && schemaVersion != 2) {
             throw new BusinessException(ErrorCode.BAD_REQUEST, "不支持的 AI 草稿版本");
         }
+        var activePeople = AiPersonMatcher.activePeople(context.ledger().getId(),
+                people.selectList(Wrappers.<LedgerPerson>lambdaQuery()
+                        .eq(LedgerPerson::getLedgerId, context.ledger().getId())
+                        .isNull(LedgerPerson::getDeletedAt)));
         if (schemaVersion == 1) {
+            AiCategoryContext categories = new AiCategoryContext(request.getExpenseCategories(), request.getIncomeCategories());
             limiter.consume("parse", context.user().getId());
-            String result = provider.parse(request.getText(), zone, context.ledger().getBaseCurrencyCode());
+            String result = provider.parse(request.getText(), zone, context.ledger().getBaseCurrencyCode(), categories,
+                    activePeople.stream().map(LedgerPerson::getName).toList());
             return validator.validate(result, context.ledger(), context.user().getId(), zone,
-                    people.selectList(Wrappers.<LedgerPerson>lambdaQuery()
-                            .eq(LedgerPerson::getLedgerId, context.ledger().getId())
-                            .isNull(LedgerPerson::getDeletedAt)));
+                    activePeople, categories);
         }
-        var activePeople = people.selectList(Wrappers.<LedgerPerson>lambdaQuery()
-                .eq(LedgerPerson::getLedgerId, context.ledger().getId())
-                .isNull(LedgerPerson::getDeletedAt));
         var parsingContext = contextFactory.create(context.ledger(), context.user().getId(), zone, request, activePeople);
         limiter.consume("parse", context.user().getId());
         return semanticValidator.validate(provider.parse(parsingContext), parsingContext);

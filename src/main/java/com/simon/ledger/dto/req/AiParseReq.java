@@ -19,9 +19,9 @@ public class AiParseReq {
     @Max(2)
     private Integer schemaVersion = 1;
 
-    @Size(max = 100)
-    private List<String> expenseCategories = List.of();
+    @Size(max = 128)
+    private List<String> expenseCategories;
 
-    @Size(max = 100)
-    private List<String> incomeCategories = List.of();
+    @Size(max = 128)
+    private List<String> incomeCategories;
 }

@@ -2,9 +2,12 @@ package com.simon.ledger.infrastructure.ai;
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Component
 public class AiProviderConfig {
+    private static final Logger log = LoggerFactory.getLogger(AiProviderConfig.class);
     private final String deepSeekKey;
     private final String deepSeekModel;
     private final String tencentSecretId;
@@ -18,6 +21,8 @@ public class AiProviderConfig {
         this.deepSeekModel = deepSeekModel;
         this.tencentSecretId = tencentSecretId;
         this.tencentSecretKey = tencentSecretKey;
+        log.info("AI provider configuration deepSeekConfigured={} tencentAsrConfigured={}",
+                textAvailable(), voiceAvailable());
     }
 
     public boolean textAvailable() {

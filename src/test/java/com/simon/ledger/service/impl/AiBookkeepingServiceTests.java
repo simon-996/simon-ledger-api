@@ -41,7 +41,7 @@ class AiBookkeepingServiceTests {
         when(access.requireAllowed("ledger-1"))
                 .thenReturn(new AiBookkeepingAccess.Context(user, ledger, null));
         when(people.selectList(any())).thenReturn(List.of());
-        when(provider.parse(eq("早餐18元，午饭32元"), any(), eq("CNY"))).thenReturn("""
+        when(provider.parse(eq("早餐18元，午饭32元"), any(), eq("CNY"), any(), any())).thenReturn("""
                 {"entries":[
                   {"sourceText":"早餐18元","type":0,"amount":"18","currencyCode":"CNY"},
                   {"sourceText":"午饭32元","type":0,"amount":"32","currencyCode":"CNY"}
@@ -57,7 +57,7 @@ class AiBookkeepingServiceTests {
         request.setZone("Asia/Shanghai");
         assertEquals(2, service.parse("ledger-1", request).getEntries().size());
         verify(limiter).consume("parse", 7L);
-        verify(provider).parse(eq("早餐18元，午饭32元"), any(), eq("CNY"));
+        verify(provider).parse(eq("早餐18元，午饭32元"), any(), eq("CNY"), any(), any());
     }
 
     @Test

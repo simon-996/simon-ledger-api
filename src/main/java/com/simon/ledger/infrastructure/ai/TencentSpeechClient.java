@@ -9,6 +9,8 @@ import com.tencentcloudapi.common.exception.TencentCloudSDKException;
 import com.tencentcloudapi.common.profile.ClientProfile;
 import com.tencentcloudapi.common.profile.HttpProfile;
 import lombok.RequiredArgsConstructor;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.util.Base64;
@@ -16,6 +18,7 @@ import java.util.Base64;
 @Component
 @RequiredArgsConstructor
 public class TencentSpeechClient {
+    private static final Logger log = LoggerFactory.getLogger(TencentSpeechClient.class);
     private final AiProviderConfig config;
 
     public String transcribe(byte[] pcm) {
@@ -42,6 +45,10 @@ public class TencentSpeechClient {
             }
             return result.trim();
         } catch (TencentCloudSDKException exception) {
+            log.warn("Tencent ASR request failed errorCode={} requestId={} exceptionType={}",
+                    AiDiagnosticLog.safeIdentifier(exception.getErrorCode()),
+                    AiDiagnosticLog.safeIdentifier(exception.getRequestId()),
+                    exception.getClass().getSimpleName());
             throw unavailable();
         }
     }
