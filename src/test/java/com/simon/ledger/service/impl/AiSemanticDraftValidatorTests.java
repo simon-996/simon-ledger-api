@@ -258,6 +258,105 @@ class AiSemanticDraftValidatorTests {
         assertFalse(received.getIssues().stream().anyMatch(issue -> issue.field().equals("paymentMode")));
     }
 
+    @Test
+    void rejectsAnAmountTakenFromOnlyPartOfANumeral() throws Exception {
+        for (String source : List.of("住宿1400元", "住宿400.50元", "住宿1,400元", "住宿一千四百元")) {
+            var raw = entry(source);
+            if (source.contains("四百")) raw.put("amountExpression", "四百");
+            assertBadRequest(() -> validate(raw));
+        }
+    }
+
+    @Test
+    void doesNotConfuseForeignCurrencyNamesEndingInYuanWithCny() throws Exception {
+        for (var currency : Map.of("USD", "美元", "EUR", "欧元", "JPY", "日元", "AUD", "澳元",
+                "CAD", "加元", "KRW", "韩元", "HKD", "港元", "MOP", "澳门元", "SGD", "新加坡元").entrySet()) {
+            var raw = entry("住宿400" + currency.getValue() + "，张三垫付，大家住。");
+            raw.put("currencyCode", currency.getKey());
+            raw.put("paymentMode", "PERSON_PAID");
+            raw.put("payerName", "张三");
+            raw.put("participantScope", "ALL");
+            var base = context();
+            var foreignLedger = new AiParsingContext(base.text(), base.ledgerName(), currency.getKey(),
+                    base.zone(), base.referenceDate(), base.people(), base.expenseCategories(), base.incomeCategories());
+            var draft = validate(raw, foreignLedger).getEntries().getFirst();
+            assertFalse(draft.getIssues().stream().anyMatch(issue -> issue.field().equals("currencyCode")),
+                    currency.getKey());
+        }
+    }
+
+    @Test
+    void requiresPaymentEvidenceForTheActualSelfOrNamedPayer() throws Exception {
+        for (String source : List.of("住宿400，我和李四都住，李四垫付。", "住宿400，我们先付的，大家住。",
+                "住宿400，张三没垫付，大家住。", "住宿400，不是张三付，大家住。")) {
+            var raw = entry(source);
+            raw.put("paymentMode", "PERSON_PAID");
+            raw.put("payerName", source.contains("我") ? "我" : "张三");
+            var draft = validate(raw).getEntries().getFirst();
+            assertNull(draft.getPayerPersonUuid(), source);
+            assertIssue(draft, "payer", "PAYER_UNSPECIFIED");
+        }
+    }
+
+    @Test
+    void doesNotTreatANegatedAllPeopleStatementAsAnAllPeopleScope() throws Exception {
+        var raw = entry("住宿400张三垫付，不是所有人都住，只有李四住。");
+        raw.put("paymentMode", "PERSON_PAID");
+        raw.put("payerName", "张三");
+        raw.put("participantScope", "ALL");
+        var draft = validate(raw).getEntries().getFirst();
+        assertTrue(draft.getPersonUuids().isEmpty());
+        assertIssue(draft, "participants", "CONFLICTING_FIELDS");
+    }
+
+    @Test
+    void rejectsDuplicateOrReorderedEntrySourceSegments() throws Exception {
+        var first = entry("住宿400，张三垫付，大家住。");
+        var second = entry("午餐80，张三垫付，大家吃。");
+        second.put("amount", "80.00");
+        second.put("amountExpression", "80");
+        second.put("categorySuggestion", "餐饮");
+        var base = context();
+        var wholeInput = new AiParsingContext(first.get("sourceText") + " " + second.get("sourceText"),
+                base.ledgerName(), base.currencyCode(), base.zone(), base.referenceDate(), base.people(),
+                base.expenseCategories(), base.incomeCategories());
+        assertBadRequest(() -> validator.validate(mapper.writeValueAsString(
+                Map.of("entries", List.of(first, first))), wholeInput));
+        assertBadRequest(() -> validator.validate(mapper.writeValueAsString(
+                Map.of("entries", List.of(second, first))), wholeInput));
+        assertEquals(2, validator.validate(mapper.writeValueAsString(
+                Map.of("entries", List.of(first, second))), wholeInput).getEntries().size());
+    }
+
+    @Test
+    void checksTheWholeClockTokenAndItsTimeOfDay() throws Exception {
+        for (var clock : List.of(Map.entry("18:00", "08:00"), Map.entry("18:00", "00:00"),
+                Map.entry("18点30分", "18:00"), Map.entry("下午8点", "08:00"))) {
+            var raw = entry("昨天" + clock.getKey() + "住宿400，张三垫付，大家住。");
+            raw.put("dateExpression", "昨天");
+            raw.put("happenedAt", "2026-10-04T" + clock.getValue() + ":00");
+            assertIssue(validate(raw).getEntries().getFirst(), "happenedAt", "DATE_AMBIGUOUS");
+        }
+        var correct = entry("昨天下午8点住宿400，张三垫付，大家住。");
+        correct.put("dateExpression", "昨天");
+        correct.put("happenedAt", "2026-10-04T20:00:00");
+        var draft = validate(correct).getEntries().getFirst();
+        assertEquals(20, draft.getHappenedAt().getHour());
+        assertEquals("TIME", draft.getDatePrecision());
+        assertFalse(draft.getIssues().stream().anyMatch(issue -> issue.field().equals("happenedAt")));
+        var midnight = entry("昨天00:00住宿400，张三垫付，大家住。");
+        midnight.put("dateExpression", "昨天");
+        midnight.put("happenedAt", "2026-10-04T00:00:00");
+        assertEquals("TIME", validate(midnight).getEntries().getFirst().getDatePrecision());
+        var missingClock = entry("昨天18:00住宿400，张三垫付，大家住。");
+        missingClock.put("dateExpression", "昨天");
+        assertIssue(validate(missingClock).getEntries().getFirst(), "happenedAt", "DATE_AMBIGUOUS");
+        var inventedSeconds = entry("昨天18:00住宿400，张三垫付，大家住。");
+        inventedSeconds.put("dateExpression", "昨天");
+        inventedSeconds.put("happenedAt", "2026-10-04T18:00:37");
+        assertIssue(validate(inventedSeconds).getEntries().getFirst(), "happenedAt", "DATE_AMBIGUOUS");
+    }
+
     private AiDraftResp validate(Map<String, Object> entry) throws Exception {
         return validate(entry, context());
     }

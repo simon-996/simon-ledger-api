@@ -27,6 +27,21 @@ public class AiSemanticDraftValidator {
     private static final List<String> PAYMENT_VERBS =
             List.of("垫付", "代付", "先付", "先出", "付了", "支付", "付款", "付", "出了");
     private static final Pattern ISO_DATE_NUMBER = Pattern.compile("\\d{4}[-/]\\d{1,2}[-/]\\d{1,2}");
+    private static final Pattern CLOCK_TIME = Pattern.compile("(?<!\\d)(\\d{1,2})[:：](\\d{1,2})(?!\\d)");
+    private static final Pattern CHINESE_TIME = Pattern.compile(
+            "(?<!\\d)(\\d{1,2})[点时](?:(\\d{1,2})分?)?(?![\\d半零〇一二两三四五六七八九十])");
+    private static final Pattern TIME_OF_DAY = Pattern.compile("凌晨|早上|上午|中午|下午|晚上");
+    private static final Pattern NEGATED_PAYMENT = Pattern.compile(
+            "(?:没(?:有)?|未(?:曾)?|不(?:是)?|并非)(?:垫|代|先|支)?\\s*$");
+    private static final Map<String, List<String>> FOREIGN_CURRENCY_NAMES = Map.ofEntries(
+            Map.entry("USD", List.of("美元", "美金")), Map.entry("EUR", List.of("欧元")),
+            Map.entry("GBP", List.of("英镑")), Map.entry("JPY", List.of("日元", "日币")),
+            Map.entry("HKD", List.of("港元", "港币")), Map.entry("TWD", List.of("新台币", "台币")),
+            Map.entry("MOP", List.of("澳门元", "澳门币")), Map.entry("SGD", List.of("新加坡元", "新币")),
+            Map.entry("THB", List.of("泰铢")), Map.entry("MYR", List.of("马来西亚林吉特", "林吉特", "马币")),
+            Map.entry("KRW", List.of("韩元", "韩币")), Map.entry("AUD", List.of("澳元", "澳币")),
+            Map.entry("CAD", List.of("加元", "加币")), Map.entry("NZD", List.of("新西兰元", "纽元", "纽币")),
+            Map.entry("CHF", List.of("瑞士法郎")));
     private final ObjectMapper mapper;
     private final AiSemanticRules rules;
     private final AiAmountExpressionParser amounts = new AiAmountExpressionParser();
@@ -48,7 +63,14 @@ public class AiSemanticDraftValidator {
             throw invalid();
         }
         AiDraftResp result = new AiDraftResp();
-        for (JsonNode raw : entries) result.getEntries().add(validateEntry(raw, context));
+        int sourceCursor = 0;
+        for (JsonNode raw : entries) {
+            AiDraftResp.Entry entry = validateEntry(raw, context);
+            int sourceStart = context.text().indexOf(entry.getSourceText(), sourceCursor);
+            if (sourceStart < 0) throw invalid();
+            sourceCursor = sourceStart + entry.getSourceText().length();
+            result.getEntries().add(entry);
+        }
         return result;
     }
 
@@ -155,6 +177,9 @@ public class AiSemanticDraftValidator {
             entry.setHappenedAt(day.atStartOfDay());
             entry.setDatePrecision("DAY");
             entry.getFieldSources().put("happenedAt", explicit ? "EXPLICIT" : "DEFAULT");
+            if (CLOCK_TIME.matcher(source).find() || CHINESE_TIME.matcher(source).find()) {
+                issue(entry, "happenedAt", "DATE_AMBIGUOUS", null, List.of());
+            }
             return;
         }
         try {
@@ -173,14 +198,15 @@ public class AiSemanticDraftValidator {
                 return;
             }
             LocalTime time = dateTime.toLocalTime();
-            if (!time.equals(LocalTime.MIDNIGHT) && !hasMatchingClockTime(source, time)) {
+            boolean explicitClock = hasMatchingClockTime(source, time);
+            if ((!time.equals(LocalTime.MIDNIGHT) || rules.hasTimeEvidence(source)) && !explicitClock) {
                 issue(entry, "happenedAt", "DATE_AMBIGUOUS", happenedAtValue, List.of());
                 entry.setHappenedAt(day.atStartOfDay());
                 entry.setDatePrecision("DAY");
                 return;
             }
             entry.setHappenedAt(dateTime);
-            entry.setDatePrecision(time.equals(LocalTime.MIDNIGHT) ? "DAY" : "TIME");
+            entry.setDatePrecision(explicitClock ? "TIME" : "DAY");
             entry.getFieldSources().put("happenedAt", explicit ? "EXPLICIT" : "DEFAULT");
         } catch (DateTimeException exception) {
             issue(entry, "happenedAt", "DATE_AMBIGUOUS", happenedAtValue, List.of());
@@ -348,34 +374,49 @@ public class AiSemanticDraftValidator {
         }
         char before = start == 0 ? '\0' : source.charAt(start - 1);
         char after = end >= source.length() ? '\0' : source.charAt(end);
+        if (isNumeralCharacter(before) || isNumeralCharacter(after) || before == '.'
+                || (after == '.' && end + 1 < source.length() && Character.isDigit(source.charAt(end + 1)))
+                || (before == ',' && start > 1 && Character.isDigit(source.charAt(start - 2)))
+                || (after == ',' && end + 1 < source.length() && Character.isDigit(source.charAt(end + 1)))) {
+            return true;
+        }
         String left = source.substring(Math.max(0, start - 4), start).stripTrailing();
         String right = source.substring(end, Math.min(source.length(), end + 4)).stripLeading();
-        if ("第周星期号年月日时分秒".indexOf(before) >= 0 || "人个位次号年月日时分秒%％成比".indexOf(after) >= 0
+        boolean japaneseCurrency = FOREIGN_CURRENCY_NAMES.get("JPY").stream().anyMatch(right::startsWith);
+        if ("第周星期号年月日时分秒".indexOf(before) >= 0
+                || (!japaneseCurrency && "人个位次号年月日时分秒%％成比".indexOf(after) >= 0)
                 || (left.length() > 0 && "第周星期号年月日时分秒".indexOf(left.charAt(left.length() - 1)) >= 0)
-                || (right.length() > 0 && "人个位次号年月日时分秒%％成比".indexOf(right.charAt(0)) >= 0)) return true;
+                || (!japaneseCurrency && right.length() > 0
+                && "人个位次号年月日时分秒%％成比".indexOf(right.charAt(0)) >= 0)) return true;
         if ((before == ':' || before == '：' || before == '/') || (after == ':' || after == '：' || after == '/')) {
             return true;
         }
         return before == '第' || after == '第';
     }
 
+    private static boolean isNumeralCharacter(char value) {
+        return Character.isDigit(value) || "零〇一二两三四五六七八九十百千万点".indexOf(value) >= 0;
+    }
+
     private boolean hasPayerEvidence(String source, String payerName,
                                      AiParsingContext.PersonCandidate payer,
                                      AiParsingContext context) {
-        if (payerName.equals("我")) return source.contains("我") && rules.hasPaymentEvidence(source);
+        String directName = payerName.equals("我") ? "我" : payer.name();
         for (String verb : PAYMENT_VERBS) {
             int verbAt = source.indexOf(verb);
             while (verbAt >= 0) {
-                if (hasOnlyThisNamedPayerBefore(source, payer.name(), verbAt, context)) return true;
+                if (hasOnlyThisNamedPayerBefore(source, directName, verbAt, context)) return true;
                 verbAt = source.indexOf(verb, verbAt + verb.length());
             }
         }
+        if (payerName.equals("我")) return false;
         for (String pronoun : List.of("他", "她")) {
             int pronounAt = source.indexOf(pronoun);
             while (pronounAt >= 0) {
                 for (String verb : PAYMENT_VERBS) {
                     int verbAt = source.indexOf(verb, pronounAt + pronoun.length());
                     if (verbAt >= 0 && verbAt - (pronounAt + pronoun.length()) <= 6
+                            && !isNegatedPayment(source, verbAt)
                             && uniqueEarlierPerson(source, pronounAt, context, payer.uuid())) return true;
                 }
                 pronounAt = source.indexOf(pronoun, pronounAt + pronoun.length());
@@ -386,10 +427,17 @@ public class AiSemanticDraftValidator {
 
     private boolean hasOnlyThisNamedPayerBefore(String source, String payerName, int verbStart,
                                                 AiParsingContext context) {
+        if (isNegatedPayment(source, verbStart)) return false;
         int nameAt = source.indexOf(payerName);
         if (nameAt < 0) return false;
         while (nameAt >= 0) {
             int nameEnd = nameAt + payerName.length();
+            String beforeName = source.substring(Math.max(0, nameAt - 4), nameAt);
+            if ((payerName.equals("我") && nameEnd < source.length() && source.charAt(nameEnd) == '们')
+                    || beforeName.endsWith("不是") || beforeName.endsWith("并非") || beforeName.endsWith("不由")) {
+                nameAt = source.indexOf(payerName, nameEnd);
+                continue;
+            }
             if (nameAt > verbStart || nameEnd > verbStart) {
                 nameAt = source.indexOf(payerName, nameAt + payerName.length());
                 continue;
@@ -408,6 +456,10 @@ public class AiSemanticDraftValidator {
             nameAt = source.indexOf(payerName, nameAt + payerName.length());
         }
         return false;
+    }
+
+    private static boolean isNegatedPayment(String source, int verbStart) {
+        return NEGATED_PAYMENT.matcher(source.substring(Math.max(0, verbStart - 8), verbStart)).find();
     }
 
     private boolean uniqueEarlierPerson(String source, int before, AiParsingContext context, String expectedUuid) {
@@ -446,6 +498,10 @@ public class AiSemanticDraftValidator {
         for (String verb : PAYMENT_VERBS) {
             int verbAt = source.indexOf(verb);
             while (verbAt >= 0) {
+                if (isNegatedPayment(source, verbAt)) {
+                    verbAt = source.indexOf(verb, verbAt + verb.length());
+                    continue;
+                }
                 int clauseStart = Math.max(Math.max(source.lastIndexOf('，', verbAt),
                                 source.lastIndexOf(',', verbAt)),
                         Math.max(source.lastIndexOf('。', verbAt), source.lastIndexOf(';', verbAt)));
@@ -484,14 +540,27 @@ public class AiSemanticDraftValidator {
     }
 
     private static boolean hasMatchingClockTime(String source, LocalTime time) {
-        String twoDigitHour = String.format("%02d", time.getHour());
-        String hour = Integer.toString(time.getHour());
-        String twoDigitMinute = String.format("%02d", time.getMinute());
-        if (source.contains(twoDigitHour + ":" + twoDigitMinute)
-                || source.contains(hour + ":" + twoDigitMinute)
-                || source.contains(twoDigitHour + "：" + twoDigitMinute)
-                || source.contains(hour + "：" + twoDigitMinute)) return true;
-        return time.getMinute() == 0 && (source.contains(hour + "点") || source.contains(hour + "时"));
+        if (time.getSecond() != 0 || time.getNano() != 0) return false;
+        for (Pattern pattern : List.of(CLOCK_TIME, CHINESE_TIME)) {
+            var matcher = pattern.matcher(source);
+            while (matcher.find()) {
+                int hour = Integer.parseInt(matcher.group(1));
+                int minute = matcher.group(2) == null ? 0 : Integer.parseInt(matcher.group(2));
+                if (hour > 23 || minute > 59) continue;
+                String prefix = source.substring(Math.max(0, matcher.start() - 8), matcher.start());
+                var periodMatcher = TIME_OF_DAY.matcher(prefix);
+                String period = "";
+                while (periodMatcher.find()) period = periodMatcher.group();
+                if ((period.equals("下午") || period.equals("晚上")) && hour < 12) hour += 12;
+                if (period.equals("中午") && hour >= 1 && hour <= 6) hour += 12;
+                if (period.equals("凌晨") && hour == 12) hour = 0;
+                if (hour == 12 && (period.equals("晚上") || period.equals("上午") || period.equals("早上"))) {
+                    continue;
+                }
+                if (time.getHour() == hour && time.getMinute() == minute) return true;
+            }
+        }
+        return false;
     }
 
     private static List<String> requiredTextList(JsonNode raw, String key, int maxItems, int maxLength) {
@@ -531,13 +600,20 @@ public class AiSemanticDraftValidator {
     private static Set<String> currenciesMentioned(String source) {
         var mentioned = new LinkedHashSet<String>();
         String upper = source.toUpperCase(Locale.ROOT);
-        if (containsAny(source, "人民币", "元", "块", "块钱") || upper.contains("CNY")) mentioned.add("CNY");
-        if (containsAny(source, "美元", "美金") || upper.contains("USD")) mentioned.add("USD");
-        if (source.contains("欧元") || upper.contains("EUR")) mentioned.add("EUR");
-        if (source.contains("英镑") || upper.contains("GBP")) mentioned.add("GBP");
-        if (source.contains("日元") || upper.contains("JPY")) mentioned.add("JPY");
-        if (source.contains("港币") || upper.contains("HKD")) mentioned.add("HKD");
+        String domesticSource = source;
+        for (var currency : FOREIGN_CURRENCY_NAMES.entrySet()) {
+            if (currency.getValue().stream().anyMatch(source::contains)
+                    || hasCurrencyCode(upper, currency.getKey())) mentioned.add(currency.getKey());
+            for (String name : currency.getValue()) domesticSource = domesticSource.replace(name, "");
+        }
+        if (containsAny(domesticSource, "人民币", "元", "块", "块钱") || hasCurrencyCode(upper, "CNY")) {
+            mentioned.add("CNY");
+        }
         return mentioned;
+    }
+
+    private static boolean hasCurrencyCode(String source, String code) {
+        return Pattern.compile("(?<![A-Z])" + code + "(?![A-Z])").matcher(source).find();
     }
 
     private static void issue(AiDraftResp.Entry entry, String field, String code,

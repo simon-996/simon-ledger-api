@@ -15,6 +15,9 @@ import java.util.regex.Pattern;
 public class AiSemanticRules {
     private static final Pattern ALLOCATION_AMOUNT = Pattern.compile(
             "(?:承担|分摊|付|支付)了?\\s*(?:\\d+(?:\\.\\d{1,2})?|[零〇一二两三四五六七八九十百千万]+)(?!\\d)");
+    private static final Pattern NEGATED_ALL = Pattern.compile(
+            "(?:不是|并非|没有|未)\\s*(?:所有人|全体|全部人|大家|所有成员)"
+                    + "|(?:所有人|全体|全部人|大家|所有成员)(?:都|全)?(?:没|未|不)");
     private static final Map<String, List<String>> CATEGORY_ALIASES = Map.ofEntries(
             Map.entry("住宿", List.of("住宿", "居住")),
             Map.entry("酒店", List.of("住宿", "居住")),
@@ -67,7 +70,8 @@ public class AiSemanticRules {
     }
 
     public boolean hasAllParticipantsEvidence(String source) {
-        return containsAny(source, "所有人", "全体", "全部人", "大家", "所有成员");
+        return containsAny(source, "所有人", "全体", "全部人", "大家", "所有成员")
+                && !NEGATED_ALL.matcher(source).find();
     }
 
     public boolean hasDateEvidence(String source) {
