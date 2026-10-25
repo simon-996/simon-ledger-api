@@ -28,9 +28,32 @@ import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
 class IdempotencyServiceReplayTests {
+    @org.junit.jupiter.api.BeforeEach void metadata() {
+        if (com.baomidou.mybatisplus.core.metadata.TableInfoHelper.getTableInfo(IdempotencyRecord.class) == null)
+            com.baomidou.mybatisplus.core.metadata.TableInfoHelper.initTableInfo(new org.apache.ibatis.builder.MapperBuilderAssistant(new com.baomidou.mybatisplus.core.MybatisConfiguration(), ""), IdempotencyRecord.class);
+    }
+
 
     @Mock private IdempotencyRecordMapper idempotencyRecordMapper;
     @Mock private Supplier<VersionMutationResp> supplier;
+
+    @Test
+    void idempotencyCompletionMustUseTransactionAndCasWithoutDeletingKeyOnFailure() throws Exception {
+        var annotation = IdempotencyServiceImpl.class.getMethod("execute", String.class, String.class, String.class, Class.class, Supplier.class)
+                .getAnnotation(org.springframework.transaction.annotation.Transactional.class);
+        org.junit.jupiter.api.Assertions.assertNotNull(annotation, "business and cache response must share a transaction");
+        when(idempotencyRecordMapper.selectOne(any())).thenReturn(null);
+        when(supplier.get()).thenReturn(new VersionMutationResp("uuid", 1, false));
+        when(idempotencyRecordMapper.insert(any(IdempotencyRecord.class))).thenAnswer(call -> { ((IdempotencyRecord)call.getArgument(0)).setId(42L); return 1; });
+        IdempotencyServiceImpl service = new IdempotencyServiceImpl(idempotencyRecordMapper, Jackson2ObjectMapperBuilder.json().build());
+        try (MockedStatic<StpUtil> stpUtil = mockStatic(StpUtil.class)) {
+            stpUtil.when(StpUtil::getLoginIdAsLong).thenReturn(7L);
+            BusinessException error = assertThrows(BusinessException.class, () -> service.execute("key", "POST", "/api/ledgers", VersionMutationResp.class, supplier));
+            assertEquals(ErrorCode.CONFLICT, error.getErrorCode());
+        }
+        verify(idempotencyRecordMapper, never()).deleteById(any(java.io.Serializable.class));
+        verify(idempotencyRecordMapper, never()).updateById(any(IdempotencyRecord.class));
+    }
 
     @Test
     void versionMutationResponseExposesNoArgsConstructorForReplayDeserialization() {

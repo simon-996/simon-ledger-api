@@ -11,7 +11,7 @@ import org.springframework.stereotype.Service;
 @Service
 @RequiredArgsConstructor
 public class AiTranscriptionService {
-    private static final int MAX_PCM_BYTES = 60 * 16000 * 2;
+    public static final int MAX_PCM_BYTES = 60 * 16000 * 2;
     private static final int MAX_BASE64_BYTES = 3_000_000;
     private final AiBookkeepingAccess access;
     private final AiUsageLimiter limiter;
@@ -20,6 +20,23 @@ public class AiTranscriptionService {
 
     public AiTranscriptionResp transcribe(String ledgerUuid, byte[] pcm) {
         AiBookkeepingAccess.Context context = access.requireAllowed(ledgerUuid);
+        try (var permit = limiter.acquire(context.user().getId())) {
+            return transcribeAllowed(context, pcm);
+        }
+    }
+
+    public AiTranscriptionResp transcribeStream(String ledgerUuid, java.io.InputStream stream, long contentLength) {
+        AiBookkeepingAccess.Context context = access.requireAllowed(ledgerUuid);
+        try (var permit = limiter.acquire(context.user().getId())) {
+            if (contentLength > MAX_PCM_BYTES) throw new BusinessException(ErrorCode.BAD_REQUEST, "录音超过 60 秒上限");
+            byte[] pcm = stream.readNBytes(MAX_PCM_BYTES + 1);
+            return transcribeAllowed(context, pcm);
+        } catch (java.io.IOException error) {
+            throw new BusinessException(ErrorCode.BAD_REQUEST, "录音读取失败");
+        }
+    }
+
+    private AiTranscriptionResp transcribeAllowed(AiBookkeepingAccess.Context context, byte[] pcm) {
         if (!config.textAvailable() || !config.voiceAvailable()) {
             throw new BusinessException(ErrorCode.SYSTEM_ERROR, "语音记账尚未配置");
         }

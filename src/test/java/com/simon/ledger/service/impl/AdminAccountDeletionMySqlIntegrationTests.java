@@ -49,6 +49,14 @@ class AdminAccountDeletionMySqlIntegrationTests {
     @Autowired private AdminAccountDeletionService previewService;
     @Autowired private AdminAccountDeletionExecutor executor;
     @Autowired private PlatformTransactionManager transactionManager;
+    @Autowired private com.simon.ledger.service.ChangeLogService changeLogs;
+    @Autowired private com.simon.ledger.service.IdempotencyService idempotency;
+    @Autowired private com.simon.ledger.service.LedgerService ledgerService;
+    @Autowired private com.simon.ledger.service.AuthService authService;
+    @Autowired private com.simon.ledger.service.TransactionService transactionService;
+    @Autowired private com.simon.ledger.mapper.LedgerMapper ledgerMapper;
+    @Autowired private com.simon.ledger.service.InviteService inviteService;
+
     @MockitoBean private AdminService adminService;
     @MockitoBean private AccountDeletionSessions sessions;
 
@@ -129,6 +137,239 @@ class AdminAccountDeletionMySqlIntegrationTests {
                 VALUES (?, 'unrelated', 'POST', '/api/other-path', 0,
                     '{"uuid":"unrelated"}', DATE_ADD(NOW(), INTERVAL 1 DAY))
                 """, otherId);
+    }
+
+    static class UnserializableResponse { public UnserializableResponse getSelf() { return this; } }
+
+    @Test
+    void responseSerializationFailureRollsBackBusinessAndReservationThenRetryCommitsOnce() {
+        withLogin(successorId, () -> {
+            assertThrows(BusinessException.class, () -> idempotency.execute("atomic-create", "POST", "/api/ledgers", Object.class,
+                    () -> { ledgerService.create(createLedgerRequest("atomic")); return new UnserializableResponse(); }));
+            assertEquals(0, count("ledger", "name = 'atomic'"));
+            assertEquals(0, count("idempotency_record", "request_key = 'atomic-create'"));
+            var saved = idempotency.execute("atomic-create", "POST", "/api/ledgers", com.simon.ledger.dto.resp.LedgerResp.class,
+                    () -> ledgerService.create(createLedgerRequest("atomic")));
+            var replay = idempotency.execute("atomic-create", "POST", "/api/ledgers", com.simon.ledger.dto.resp.LedgerResp.class,
+                    () -> { throw new AssertionError("must replay"); });
+            assertEquals(saved.getUuid(), replay.getUuid());
+            assertEquals(1, count("ledger", "name = 'atomic'"));
+        });
+    }
+
+    @Test
+    void profileAndTransactionCreationParticipateInOuterIdempotencyRollback() {
+        withLogin(targetId, () -> {
+            var profile = new com.simon.ledger.dto.req.AuthProfileUpdateReq(); profile.setVersion(1); profile.setNickname("changed"); profile.setAvatar("");
+            assertThrows(BusinessException.class, () -> idempotency.execute("profile-atomic", "PUT", "/api/auth/me", Object.class,
+                    () -> { authService.updateProfile(profile); return new UnserializableResponse(); }));
+            assertEquals("Target", jdbc.queryForObject("SELECT nickname FROM user_account WHERE id = ?", String.class, targetId));
+            assertEquals(1, jdbc.queryForObject("SELECT version FROM user_account WHERE id = ?", Integer.class, targetId));
+            var tx = new com.simon.ledger.dto.req.TransactionCreateReq();
+            tx.setType(0); tx.setAmount(new BigDecimal("1.01")); tx.setCurrencyCode("CNY"); tx.setCategory("food");
+            tx.setPersonUuids(List.of("person-shared")); tx.setClientOperationId("atomic-tx"); tx.setHappenedAt(java.time.LocalDateTime.now());
+            assertThrows(BusinessException.class, () -> idempotency.execute("transaction-atomic", "POST", "/api/ledgers/shared/transactions", Object.class,
+                    () -> { transactionService.create("shared", tx); return new UnserializableResponse(); }));
+            assertEquals(0, count("ledger_transaction", "client_operation_id = 'atomic-tx'"));
+        });
+    }
+
+    @Test
+    void concurrentSameKeyCreatesOneLedgerAndLosingSpeculationRollsBack() throws Exception {
+        var barrier = new java.util.concurrent.CountDownLatch(2);
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        try {
+            java.util.concurrent.Callable<Void> create = () -> {
+                withLogin(successorId, () -> {
+                    try {
+                        idempotency.execute("same-key", "POST", "/api/ledgers", com.simon.ledger.dto.resp.LedgerResp.class, () -> {
+                            var result = ledgerService.create(createLedgerRequest("same-key")); barrier.countDown(); await(barrier); return result;
+                        });
+                    } catch (BusinessException error) { assertEquals(ErrorCode.CONFLICT, error.getErrorCode()); }
+                }); return null;
+            };
+            var first = workers.submit(create); var second = workers.submit(create);
+            first.get(10, TimeUnit.SECONDS); second.get(10, TimeUnit.SECONDS);
+            assertEquals(1, count("ledger", "name = 'same-key'"));
+            assertEquals(1, count("idempotency_record", "request_key = 'same-key' AND response_code = 0"));
+        } finally { workers.shutdownNow(); }
+    }
+
+    @Test
+    void originalUsdTransactionRemainsEditableAfterBaseChangeEvenWhenLegacyRateIsMissing() {
+        jdbc.update("UPDATE ledger SET base_currency_code='EUR',exchange_rate_to_cny=8,currency_rates_to_cny=? WHERE id=?",
+                "{\"CNY\":\"1\",\"USD\":\"7\",\"EUR\":\"8\"}", sharedId);
+        jdbc.update("UPDATE ledger_transaction SET currency_code='USD',amount=100 WHERE uuid='tx-shared'");
+        withLogin(targetId, () -> {
+            var update = new com.simon.ledger.dto.req.TransactionUpdateReq(); update.setVersion(1); update.setType(0);
+            update.setAmount(new BigDecimal("100.00")); update.setCurrencyCode("USD"); update.setCategory("food");
+            update.setPersonUuids(List.of("person-shared")); update.setPayerPersonUuid("person-shared");
+            update.setHappenedAt(java.time.LocalDateTime.now()); update.setNote("retained USD");
+            var first = transactionService.update("shared", "tx-shared", update);
+            assertEquals("USD",first.getCurrencyCode()); assertEquals(new BigDecimal("100.00"), first.getAmount());
+            jdbc.update("UPDATE ledger SET currency_rates_to_cny='{\"CNY\":\"1\",\"EUR\":\"8\"}' WHERE id=?", sharedId);
+            update.setVersion(first.getVersion()); update.setNote("legacy USD without a known rate");
+            var second = transactionService.update("shared", "tx-shared", update);
+            assertEquals("USD",second.getCurrencyCode()); assertEquals(new BigDecimal("100.00"),second.getAmount());
+            assertEquals("legacy USD without a known rate",second.getNote());
+            assertEquals("USD",jdbc.queryForObject("SELECT currency_code FROM ledger_transaction WHERE uuid='tx-shared'",String.class));
+        });
+    }
+
+    @Test
+    void defaultAnd255CharacterAvatarsCanJoinRepeatedlyWithoutNullWrites() {
+        for (String avatar : new String[]{null, "https://example.test/" + "x".repeat(255 - "https://example.test/".length())}) {
+            var request = new com.simon.ledger.dto.req.AuthRegisterReq(); request.setEmail(avatar==null ? "default-avatar@example.test" : "long-avatar@example.test");
+            request.setNickname("Avatar"); request.setPassword("password"); request.setAvatar(avatar);
+            var user = authService.register(request);
+            withLogin(id("user_account",user.getUuid()), () -> {
+                var first = inviteService.join("invite-shared");
+                var second = inviteService.join("invite-shared");
+                assertEquals(avatar==null ? "" : avatar,first.getPerson().getAvatar());
+                assertEquals(first.getPerson().getUuid(),second.getPerson().getUuid());
+                assertEquals(first.getPerson().getVersion(),second.getPerson().getVersion());
+            });
+        }
+    }
+
+    @Test
+    void legacyCrossColumnCollisionDoesNotBreakOriginalEmailLoginAndCannotBeRegisteredAgain() {
+        jdbc.update("UPDATE user_account SET password_hash = ? WHERE id = ?", cn.hutool.crypto.digest.BCrypt.hashpw("password"), targetId);
+        jdbc.update("UPDATE user_account SET phone = 'target@example.test' WHERE id = ?", successorId);
+        try (var login = org.mockito.Mockito.mockStatic(cn.dev33.satoken.stp.StpUtil.class)) {
+            var request = new com.simon.ledger.dto.req.AuthLoginReq(); request.setAccount("target@example.test"); request.setPassword("password");
+            assertEquals("target", authService.login(request).getUser().getUuid());
+        }
+        var register = new com.simon.ledger.dto.req.AuthRegisterReq(); register.setNickname("new"); register.setPassword("password"); register.setPhone("target@example.test");
+        assertEquals(ErrorCode.BAD_REQUEST, assertThrows(BusinessException.class, () -> authService.register(register)).getErrorCode());
+        jdbc.update("UPDATE user_account SET phone = 'legacy@example.test' WHERE id = ?", successorId);
+        register.setPhone(null); register.setEmail("legacy@example.test");
+        assertEquals(ErrorCode.BAD_REQUEST, assertThrows(BusinessException.class, () -> authService.register(register)).getErrorCode());
+    }
+
+    @Test
+    void idempotencyReplayPreservesLargeAmountsAndAllRateDecimals() {
+        withLogin(successorId, () -> {
+            var original = new com.simon.ledger.dto.resp.LedgerResp(); original.setUuid("exact-rate");
+            original.setExchangeRateToCny(new BigDecimal("9999999999.12345678"));
+            original.setCurrencyRatesToCny(java.util.Map.of("USD", original.getExchangeRateToCny()));
+            idempotency.execute("exact-rate", "POST", "/api/ledgers", com.simon.ledger.dto.resp.LedgerResp.class, () -> original);
+            var replay = idempotency.execute("exact-rate", "POST", "/api/ledgers", com.simon.ledger.dto.resp.LedgerResp.class,
+                    () -> { throw new AssertionError("must replay"); });
+            assertEquals(original.getExchangeRateToCny(), replay.getExchangeRateToCny());
+            assertEquals(original.getCurrencyRatesToCny(), replay.getCurrencyRatesToCny());
+        });
+    }
+
+    @Test
+    void deletionWaitsForAtomicLedgerResponseThenInvalidatesIt() throws Exception {
+        jdbc.update("UPDATE ledger_member SET role = 'admin' WHERE uuid = 'shared-successor'");
+        var preview = previewService.preview("target");
+        var businessFinished = new java.util.concurrent.CountDownLatch(1);
+        var allowCompletion = new java.util.concurrent.CountDownLatch(1);
+        var workers = Executors.newFixedThreadPool(2);
+        try {
+            var write = workers.submit(() -> withLogin(successorId, () -> {
+                var request = new com.simon.ledger.dto.req.LedgerUpdateReq(); request.setVersion(1); request.setName("Shared");
+                request.setBaseCurrencyCode("CNY"); request.setExchangeRateToCny(BigDecimal.ONE);
+                idempotency.execute("deletion-race", "PUT", "/api/ledgers/shared", com.simon.ledger.dto.resp.LedgerResp.class, () -> {
+                    var response = ledgerService.update("shared", request); businessFinished.countDown(); await(allowCompletion); return response;
+                });
+            }));
+            assertTrue(businessFinished.await(5, TimeUnit.SECONDS));
+            var deletion = workers.submit(() -> {
+                try { executor.delete("target", request(preview.getFingerprint(), true)); return false; }
+                catch (BusinessException error) { assertEquals(ErrorCode.CONFLICT, error.getErrorCode()); return true; }
+            });
+            // Releasing the writer commits business and response atomically. Deletion may
+            // reject its now-stale preview; retry with a fresh fingerprint before checking cache.
+            allowCompletion.countDown(); write.get(10, TimeUnit.SECONDS);
+            if (deletion.get(10, TimeUnit.SECONDS)) executor.delete("target", request(previewService.preview("target").getFingerprint(), true));
+            assertEquals(-2, jdbc.queryForObject("SELECT response_code FROM idempotency_record WHERE request_key = 'deletion-race'", Integer.class));
+            assertNull(jdbc.queryForObject("SELECT response_body FROM idempotency_record WHERE request_key = 'deletion-race'", String.class));
+        } finally { allowCompletion.countDown(); workers.shutdownNow(); }
+    }
+
+    @Test
+    void jsonRateStoragePreservesAllDecimal18Digits() {
+        withLogin(successorId, () -> {
+            var request = createLedgerRequest("precise-rate");
+            request.setCurrencyRatesToCny(java.util.Map.of("USD", new BigDecimal("9999999999.12345678")));
+            var created = ledgerService.create(request);
+            assertEquals(0, new BigDecimal("9999999999.12345678").compareTo(ledgerService.detail(created.getUuid()).getCurrencyRatesToCny().get("USD")));
+        });
+    }
+
+    @Test
+    void rateMapPersistsThroughEntityInsertAndWrapperUpdateWithoutLosingLegacyBase() {
+        withLogin(successorId, () -> {
+            var request = createLedgerRequest("rates"); request.setBaseCurrencyCode("USD"); request.setExchangeRateToCny(new BigDecimal("7"));
+            request.setCurrencyRatesToCny(java.util.Map.of("EUR", new BigDecimal("8")));
+            var created = ledgerService.create(request);
+            var stored = ledgerMapper.selectOne(com.baomidou.mybatisplus.core.toolkit.Wrappers.<com.simon.ledger.entity.Ledger>lambdaQuery()
+                    .eq(com.simon.ledger.entity.Ledger::getUuid, created.getUuid()));
+            assertEquals(0, new BigDecimal("7").compareTo(stored.getCurrencyRatesToCny().get("USD")));
+            var update = new com.simon.ledger.dto.req.LedgerUpdateReq(); update.setVersion(1); update.setName("rates");
+            update.setBaseCurrencyCode("EUR"); update.setExchangeRateToCny(new BigDecimal("8"));
+            ledgerService.update(created.getUuid(), update);
+            var detail = ledgerService.detail(created.getUuid());
+            assertEquals(0, new BigDecimal("7").compareTo(detail.getCurrencyRatesToCny().get("USD")));
+            assertEquals(0, new BigDecimal("8").compareTo(detail.getCurrencyRatesToCny().get("EUR")));
+        });
+    }
+
+    private com.simon.ledger.dto.req.LedgerCreateReq createLedgerRequest(String name) {
+        var request = new com.simon.ledger.dto.req.LedgerCreateReq(); request.setName(name); request.setBaseCurrencyCode("CNY"); request.setExchangeRateToCny(BigDecimal.ONE); return request;
+    }
+    private void withLogin(Long userId, Runnable action) {
+        try (var login = org.mockito.Mockito.mockStatic(cn.dev33.satoken.stp.StpUtil.class)) {
+            login.when(cn.dev33.satoken.stp.StpUtil::getLoginIdAsLong).thenReturn(userId); action.run();
+        }
+    }
+
+    @Test
+    void changelogAllocationUsesCurrentReadAfterRepeatableReadSnapshot() throws Exception {
+        java.util.concurrent.CountDownLatch snapshotTaken = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch writerCommitted = new java.util.concurrent.CountDownLatch(1);
+        ExecutorService workers = Executors.newSingleThreadExecutor();
+        try {
+            Future<?> waitingWriter = workers.submit(() -> {
+                TransactionTemplate tx = new TransactionTemplate(transactionManager);
+                tx.setIsolationLevel(org.springframework.transaction.TransactionDefinition.ISOLATION_REPEATABLE_READ);
+                tx.executeWithoutResult(status -> {
+                    jdbc.queryForObject("SELECT COUNT(*) FROM ledger_change_log WHERE ledger_id = ?", Integer.class, sharedId);
+                    snapshotTaken.countDown();
+                    await(writerCommitted);
+                    jdbc.queryForObject("SELECT id FROM ledger WHERE id = ? FOR UPDATE", Long.class, sharedId);
+                    changeLogs.record(sharedId, "ledger", "shared", "update", successorId);
+                });
+            });
+            assertTrue(snapshotTaken.await(5, TimeUnit.SECONDS));
+            new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
+                jdbc.queryForObject("SELECT id FROM ledger WHERE id = ? FOR UPDATE", Long.class, sharedId);
+                changeLogs.record(sharedId, "ledger", "shared", "update", successorId);
+            });
+            writerCommitted.countDown();
+            waitingWriter.get(5, TimeUnit.SECONDS);
+            assertEquals(3, count("ledger_change_log", "ledger_id = " + sharedId));
+        } finally { writerCommitted.countDown(); workers.shutdownNow(); }
+    }
+
+    private static void await(java.util.concurrent.CountDownLatch latch) {
+        try { if (!latch.await(5, TimeUnit.SECONDS)) throw new AssertionError("Timed out waiting for test barrier"); }
+        catch (InterruptedException error) { Thread.currentThread().interrupt(); throw new AssertionError(error); }
+    }
+
+    @Test
+    void deletionInvalidatesProcessingResponsesAndAnonymizesPriorAiAudits() {
+        jdbc.update("INSERT INTO admin_operation_log (uuid, admin_user_id, action, target_type, target_uuid, detail) "
+                + "SELECT 'prior-ai', id, 'ai_bookkeeping_grant', 'user_account', 'target', '授权 AI 记账' FROM admin_user LIMIT 1");
+        jdbc.update("INSERT INTO idempotency_record (user_id, request_key, request_method, request_path, response_code, expires_at) "
+                + "VALUES (?, 'processing', 'PUT', '/api/ledgers/shared', -1, DATE_ADD(NOW(), INTERVAL 1 DAY))", successorId);
+        AdminAccountDeletionPreviewResp preview = previewService.preview("target");
+        executor.delete("target", request(preview.getFingerprint(), true));
+        assertNull(jdbc.queryForObject("SELECT target_uuid FROM admin_operation_log WHERE uuid = 'prior-ai'", String.class));
+        assertEquals(-2, jdbc.queryForObject("SELECT response_code FROM idempotency_record WHERE request_key = 'processing'", Integer.class));
     }
 
     @Test

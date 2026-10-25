@@ -3,6 +3,8 @@ package com.simon.ledger.dto.resp;
 import lombok.Data;
 
 import java.time.LocalDateTime;
+import java.math.BigDecimal;
+import java.util.Map;
 import java.util.List;
 
 @Data
@@ -17,6 +19,10 @@ public class InviteResp {
     private String ledgerName;
 
     private String ledgerBaseCurrencyCode;
+
+    private BigDecimal ledgerExchangeRateToCny;
+
+    private Map<String, BigDecimal> ledgerCurrencyRatesToCny;
 
     private Integer ledgerMemberCount;
 

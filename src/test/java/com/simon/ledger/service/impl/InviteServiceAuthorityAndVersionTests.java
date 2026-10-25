@@ -41,6 +41,7 @@ import java.time.LocalDateTime;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -74,6 +75,23 @@ class InviteServiceAuthorityAndVersionTests {
         service = new InviteServiceImpl(ledgerMapper, memberMapper, userMapper, changeLogService);
         ReflectionTestUtils.setField(service, "baseMapper", inviteMapper);
         ReflectionTestUtils.setField(service, "ledgerPersonMapper", personMapper);
+    }
+
+    @Test
+    void legacyCnyInviteAndJoinedLedgerUseUnitCompatibilityAliases() {
+        Ledger legacy = ledger(); legacy.setExchangeRateToCny(new java.math.BigDecimal("7.2"));
+        LedgerInvite invite = invite(LedgerRoles.VIEWER,9L);
+        LedgerMember existing = member(22L,"existing-member",7L,LedgerRoles.VIEWER,3,null);
+        when(inviteMapper.selectOne(any())).thenReturn(invite,invite);
+        when(ledgerMapper.selectOne(any())).thenReturn(legacy);
+        when(memberMapper.selectOne(any())).thenReturn(existing);
+        when(userMapper.selectOne(any())).thenReturn(user(7L));
+        when(personMapper.selectList(any())).thenReturn(List.of(person()));
+        InviteJoinResp response = assertDoesNotThrow(() -> loggedIn(() -> service.join("INVITE01")));
+        assertEquals(java.math.BigDecimal.ONE,response.getLedgerExchangeRateToCny());
+        assertEquals(java.math.BigDecimal.ONE,response.getInvite().getLedgerExchangeRateToCny());
+        assertEquals(java.math.BigDecimal.ONE,response.getLedger().getExchangeRateToCny());
+        assertEquals(java.math.BigDecimal.ONE,response.getLedger().getCurrencyRatesToCny().get("CNY"));
     }
 
     @Test

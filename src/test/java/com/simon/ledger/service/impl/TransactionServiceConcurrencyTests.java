@@ -385,14 +385,14 @@ class TransactionServiceConcurrencyTests {
     }
 
     @Test
-    void createUsesIndependentRequiresNewTransactionsForRetryAttempts() throws Exception {
+    void createParticipatesInOuterTransactionAndStartsOwnWhenStandalone() throws Exception {
         Method create = TransactionServiceImpl.class.getMethod(
                 "create", String.class, TransactionCreateReq.class);
         assertNull(create.getAnnotation(Transactional.class));
         TransactionTemplate template = (TransactionTemplate) ReflectionTestUtils.getField(
                 service, "createTransactions");
         assertNotNull(template);
-        assertEquals(TransactionDefinition.PROPAGATION_REQUIRES_NEW, template.getPropagationBehavior());
+        assertEquals(TransactionDefinition.PROPAGATION_REQUIRED, template.getPropagationBehavior());
     }
 
     @Test

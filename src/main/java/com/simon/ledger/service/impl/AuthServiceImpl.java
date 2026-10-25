@@ -27,6 +27,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.util.StringUtils;
 
 import java.util.List;
@@ -57,13 +58,20 @@ public class AuthServiceImpl extends ServiceImpl<UserAccountMapper, UserAccount>
         this.ledgerMapper = ledgerMapper;
         this.changeLogService = changeLogService;
         this.profileUpdateTransactions = new TransactionTemplate(transactionManager);
-        this.profileUpdateTransactions.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        this.profileUpdateTransactions.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRED);
+        this.profileUpdateTransactions.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
     }
 
     @Override
     public AuthUserResp register(AuthRegisterReq req) {
         String email = normalize(req.getEmail());
         String phone = normalize(req.getPhone());
+        if (email != null && (email.length() > 128 || !email.matches("[^\\s@]+@[^\\s@]+"))) {
+            throw new BusinessException(ErrorCode.BAD_REQUEST, "邮箱格式不正确");
+        }
+        if (phone != null && !phone.matches("\\+?[1-9][0-9]{6,14}")) {
+            throw new BusinessException(ErrorCode.BAD_REQUEST, "手机号格式不正确");
+        }
         if (!StringUtils.hasText(email) && !StringUtils.hasText(phone)) {
             throw new BusinessException(ErrorCode.BAD_REQUEST, "邮箱和手机号至少填写一个");
         }
@@ -81,9 +89,13 @@ public class AuthServiceImpl extends ServiceImpl<UserAccountMapper, UserAccount>
         user.setPhone(phone);
         user.setPasswordHash(BCrypt.hashpw(req.getPassword()));
         user.setNickname(req.getNickname().trim());
-        user.setAvatar(normalize(req.getAvatar()));
+        user.setAvatar(com.simon.ledger.common.InputValues.avatar(req.getAvatar()));
         user.setStatus(STATUS_NORMAL);
-        save(user);
+        try {
+            save(user);
+        } catch (org.springframework.dao.DuplicateKeyException error) {
+            throw new BusinessException(ErrorCode.BAD_REQUEST, "邮箱或手机号已注册");
+        }
         return toUserResp(user);
     }
 
@@ -130,6 +142,7 @@ public class AuthServiceImpl extends ServiceImpl<UserAccountMapper, UserAccount>
     @Override
     public AuthUserResp updateProfile(AuthProfileUpdateReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
+        boolean participating = TransactionSynchronizationManager.isActualTransactionActive();
         for (int attempt = 1; attempt <= PROFILE_LEDGER_LOCK_MAX_ATTEMPTS; attempt++) {
             try {
                 AuthUserResp response = profileUpdateTransactions.execute(
@@ -139,6 +152,9 @@ public class AuthServiceImpl extends ServiceImpl<UserAccountMapper, UserAccount>
                 }
                 return response;
             } catch (ProfileLedgerLockDriftException exception) {
+                if (participating) {
+                    throw new BusinessException(ErrorCode.CONFLICT, "并发状态变化，请重试原请求");
+                }
                 if (attempt == PROFILE_LEDGER_LOCK_MAX_ATTEMPTS) {
                     throw new BusinessException(ErrorCode.CONFLICT, "关联账本状态变化，请重试");
                 }
@@ -163,7 +179,7 @@ public class AuthServiceImpl extends ServiceImpl<UserAccountMapper, UserAccount>
         requireStableLedgerNamespaces(linkedLedgerIds, linkedPeople);
 
         String nickname = req.getNickname().trim();
-        String avatar = normalize(req.getAvatar());
+        String avatar = com.simon.ledger.common.InputValues.avatar(req.getAvatar());
         int nextVersion = req.getVersion() + 1;
         LocalDateTime updatedAt = LocalDateTime.now();
         int affected = baseMapper.update(null, Wrappers.<UserAccount>lambdaUpdate()
@@ -271,14 +287,14 @@ public class AuthServiceImpl extends ServiceImpl<UserAccountMapper, UserAccount>
 
     private boolean existsByEmail(String email) {
         return lambdaQuery()
-                .eq(UserAccount::getEmail, email)
+                .and(q -> q.eq(UserAccount::getEmail, email).or().eq(UserAccount::getPhone, email))
                 .isNull(UserAccount::getDeletedAt)
                 .exists();
     }
 
     private boolean existsByPhone(String phone) {
         return lambdaQuery()
-                .eq(UserAccount::getPhone, phone)
+                .and(q -> q.eq(UserAccount::getPhone, phone).or().eq(UserAccount::getEmail, phone))
                 .isNull(UserAccount::getDeletedAt)
                 .exists();
     }
@@ -289,9 +305,7 @@ public class AuthServiceImpl extends ServiceImpl<UserAccountMapper, UserAccount>
             return null;
         }
         return lambdaQuery()
-                .and(q -> q.eq(UserAccount::getEmail, normalizedAccount)
-                        .or()
-                        .eq(UserAccount::getPhone, normalizedAccount))
+                .eq(normalizedAccount.contains("@") ? UserAccount::getEmail : UserAccount::getPhone, normalizedAccount)
                 .isNull(UserAccount::getDeletedAt)
                 .one();
     }
@@ -302,7 +316,7 @@ public class AuthServiceImpl extends ServiceImpl<UserAccountMapper, UserAccount>
         resp.setEmail(user.getEmail());
         resp.setPhone(user.getPhone());
         resp.setNickname(user.getNickname());
-        resp.setAvatar(user.getAvatar());
+        resp.setAvatar(com.simon.ledger.common.InputValues.avatar(user.getAvatar()));
         resp.setStatus(user.getStatus());
         resp.setVersion(user.getVersion());
         return resp;

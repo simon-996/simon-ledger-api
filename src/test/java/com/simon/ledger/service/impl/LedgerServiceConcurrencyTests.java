@@ -41,6 +41,7 @@ import java.util.List;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -74,6 +75,37 @@ class LedgerServiceConcurrencyTests {
         initializeLambdaMetadata(UserAccount.class);
         service = new LedgerServiceImpl(memberMapper, userMapper, changeLogService, personService);
         ReflectionTestUtils.setField(service, "baseMapper", ledgerMapper);
+    }
+
+    @Test
+    void legacyCnyDetailReturnsUnitMapAndUnitCompatibilityAlias() {
+        Ledger legacy = ledger(2,null); legacy.setExchangeRateToCny(new BigDecimal("7.2"));
+        legacy.setCurrencyRatesToCny(java.util.Map.of("CNY",BigDecimal.ONE));
+        LedgerMember owner = member("owner",5,null);
+        stubLedgerAndMember(legacy,owner); stubSnapshotMembers(owner);
+        ReflectionTestUtils.setField(service,"entityClass",Ledger.class);
+        ReflectionTestUtils.setField(service,"mapperClass",LedgerMapper.class);
+        LedgerResp response = assertDoesNotThrow(() -> loggedIn(() -> service.detail("ledger-uuid")));
+        assertEquals(BigDecimal.ONE,response.getExchangeRateToCny());
+        assertEquals(BigDecimal.ONE,response.getCurrencyRatesToCny().get("CNY"));
+    }
+
+    @Test
+    void legacyUsdtLedgerCanBeReadAndUpdatedWithItsOriginalRate() {
+        Ledger legacy = ledger(2,null); legacy.setBaseCurrencyCode("USDT"); legacy.setExchangeRateToCny(new BigDecimal("7"));
+        LedgerMember owner = member("owner",5,null);
+        stubLedgerAndMember(legacy,owner); stubSnapshotMembers(owner);
+        ReflectionTestUtils.setField(service,"entityClass",Ledger.class);
+        ReflectionTestUtils.setField(service,"mapperClass",LedgerMapper.class);
+        LedgerResp detail = assertDoesNotThrow(() -> loggedIn(() -> service.detail("ledger-uuid")));
+        assertEquals("USDT",detail.getBaseCurrencyCode());
+        assertEquals(new BigDecimal("7"),detail.getCurrencyRatesToCny().get("USDT"));
+        when(ledgerMapper.update(isNull(),any())).thenReturn(1);
+        var request = updateReq(2); request.setBaseCurrencyCode("USDT"); request.setExchangeRateToCny(new BigDecimal("7"));
+        LedgerResp updated = assertDoesNotThrow(() -> loggedIn(() -> service.update("ledger-uuid",request)));
+        assertEquals("USDT",updated.getBaseCurrencyCode());
+        assertEquals(new BigDecimal("7"),updated.getExchangeRateToCny());
+        assertEquals(new BigDecimal("7"),updated.getCurrencyRatesToCny().get("USDT"));
     }
 
     @Test
@@ -434,7 +466,7 @@ class LedgerServiceConcurrencyTests {
         assertEquals(remote, conflict.getRemoteVersion());
         assertEquals(deleted, conflict.getRemoteDeleted());
         LedgerResp snapshot = assertInstanceOf(LedgerResp.class, conflict.getRemoteSnapshot());
-        assertEquals(Set.of("uuid", "name", "baseCurrencyCode", "exchangeRateToCny", "version", "role",
+        assertEquals(Set.of("uuid", "name", "baseCurrencyCode", "exchangeRateToCny", "currencyRatesToCny", "version", "role",
                         "memberCount", "members", "createdAt", "updatedAt"),
                 java.util.Arrays.stream(LedgerResp.class.getDeclaredFields()).map(java.lang.reflect.Field::getName)
                         .collect(java.util.stream.Collectors.toSet()));

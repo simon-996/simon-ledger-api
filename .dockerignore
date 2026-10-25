@@ -1,7 +1,8 @@
 .git
 .gitignore
 .idea
-target
+target/*
+!target/app.jar
 logs
 *.log
 
@@ -9,3 +10,6 @@ src/main/resources/application-dev.yml
 
 README.md
 sql
+
+app.tar.gz
+.worktrees

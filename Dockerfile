@@ -9,9 +9,14 @@ WORKDIR /app
 
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
     && echo "$TZ" > /etc/timezone \
-    && useradd -r -u 10001 appuser
+    && useradd -r -u 10001 appuser \
+    && mkdir -p /logs \
+    && chown appuser:appuser /logs \
+    && ln -s /logs /app/logs
 
-COPY app.jar /app/app.jar
+ARG APP_JAR=target/app.jar
+
+COPY ${APP_JAR} /app/app.jar
 
 EXPOSE 18080
 

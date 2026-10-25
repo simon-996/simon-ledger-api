@@ -83,14 +83,14 @@ class AiBookkeepingContractTests {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.entries[0].amount").value(18));
 
-        when(transcription.transcribe(eq("ledger-1"), any(byte[].class)))
+        when(transcription.transcribeStream(eq("ledger-1"), any(java.io.InputStream.class), org.mockito.ArgumentMatchers.anyLong()))
                 .thenReturn(new AiTranscriptionResp("早餐花了十八元"));
         byte[] pcm = new byte[32000];
         mvc.perform(post("/api/ledgers/ledger-1/ai-bookkeeping/transcribe")
                         .contentType(MediaType.APPLICATION_OCTET_STREAM).content(pcm))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.text").value("早餐花了十八元"));
-        verify(transcription).transcribe(eq("ledger-1"), any(byte[].class));
+        verify(transcription).transcribeStream(eq("ledger-1"), any(java.io.InputStream.class), org.mockito.ArgumentMatchers.eq(32000L));
         mvc.perform(post("/api/ledgers/ledger-1/ai-bookkeeping/transcribe")
                         .contentType(MediaType.APPLICATION_JSON).content("{}"))
                 .andExpect(status().isUnsupportedMediaType());

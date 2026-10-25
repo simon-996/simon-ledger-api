@@ -19,6 +19,7 @@ public class AdminAccountDeletionPreviewResp {
     @Data
     public static class Member {
         private String userUuid;
+        private String account;
         private String nickname;
         private String role;
     }

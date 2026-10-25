@@ -26,6 +26,10 @@ public class AdminOperationLog {
 
     private String detail;
 
+    private Boolean previousValue;
+
+    private Boolean newValue;
+
     private String ipAddress;
 
     private LocalDateTime createdAt;

@@ -2,6 +2,7 @@ package com.simon.ledger.dto.req;
 
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Email;
+import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 import lombok.Data;
 
@@ -13,6 +14,7 @@ public class AuthRegisterReq {
     private String email;
 
     @Size(max = 32, message = "手机号不能超过 32 个字符")
+    @Pattern(regexp = "^$|^\\+?[1-9][0-9]{6,14}$", message = "手机号须为 7 至 15 位数字，可带国际区号 +")
     private String phone;
 
     @NotBlank(message = "密码不能为空")

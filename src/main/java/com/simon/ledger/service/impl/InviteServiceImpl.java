@@ -219,7 +219,7 @@ public class InviteServiceImpl extends ServiceImpl<LedgerInviteMapper, LedgerInv
             person.setLedgerId(ledger.getId());
             person.setLinkedUserId(user.getId());
             person.setName(user.getNickname());
-            person.setAvatar(user.getAvatar());
+            person.setAvatar(com.simon.ledger.common.InputValues.avatar(user.getAvatar()));
             person.setVersion(1);
             if (ledgerPersonMapper.insert(person) != 1) {
                 throw new BusinessException(ErrorCode.CONFLICT, "创建参与人失败，请重试");
@@ -228,7 +228,7 @@ public class InviteServiceImpl extends ServiceImpl<LedgerInviteMapper, LedgerInv
             return person;
         }
         boolean changed = !java.util.Objects.equals(person.getName(), user.getNickname())
-                || !java.util.Objects.equals(person.getAvatar(), user.getAvatar())
+                || !java.util.Objects.equals(person.getAvatar(), com.simon.ledger.common.InputValues.avatar(user.getAvatar()))
                 || person.getDeletedAt() != null;
         if (!changed) {
             return person;
@@ -239,7 +239,7 @@ public class InviteServiceImpl extends ServiceImpl<LedgerInviteMapper, LedgerInv
                 .eq(LedgerPerson::getId, person.getId())
                 .eq(LedgerPerson::getVersion, observedVersion)
                 .set(LedgerPerson::getName, user.getNickname())
-                .set(LedgerPerson::getAvatar, user.getAvatar())
+                .set(LedgerPerson::getAvatar, com.simon.ledger.common.InputValues.avatar(user.getAvatar()))
                 .set(LedgerPerson::getUpdatedAt, now)
                 .set(LedgerPerson::getVersion, nextVersion);
         if (person.getDeletedAt() != null) {
@@ -252,7 +252,7 @@ public class InviteServiceImpl extends ServiceImpl<LedgerInviteMapper, LedgerInv
             throw new BusinessException(ErrorCode.CONFLICT, "参与人状态已变化，请重试");
         }
         person.setName(user.getNickname());
-        person.setAvatar(user.getAvatar());
+        person.setAvatar(com.simon.ledger.common.InputValues.avatar(user.getAvatar()));
         person.setDeletedAt(null);
         person.setUpdatedAt(now);
         person.setVersion(nextVersion);
@@ -283,7 +283,8 @@ public class InviteServiceImpl extends ServiceImpl<LedgerInviteMapper, LedgerInv
         ledgerResp.setUuid(ledger.getUuid());
         ledgerResp.setName(ledger.getName());
         ledgerResp.setBaseCurrencyCode(ledger.getBaseCurrencyCode());
-        ledgerResp.setExchangeRateToCny(ledger.getExchangeRateToCny());
+        ledgerResp.setExchangeRateToCny(com.simon.ledger.common.CurrencyRates.baseRateToCny(ledger));
+        ledgerResp.setCurrencyRatesToCny(com.simon.ledger.common.CurrencyRates.effective(ledger));
         ledgerResp.setVersion(ledger.getVersion());
         ledgerResp.setRole(member.getRole());
         List<LedgerMember> activeMembers = ledgerMemberMapper.selectList(
@@ -381,7 +382,7 @@ public class InviteServiceImpl extends ServiceImpl<LedgerInviteMapper, LedgerInv
         resp.setUuid(member.getUuid());
         resp.setUserUuid(user == null ? null : user.getUuid());
         resp.setNickname(user == null ? null : user.getNickname());
-        resp.setAvatar(user == null ? null : user.getAvatar());
+        resp.setAvatar(user == null ? null : com.simon.ledger.common.InputValues.avatar(user.getAvatar()));
         resp.setRole(member.getRole());
         resp.setStatus(member.getStatus());
         resp.setJoinedAt(member.getJoinedAt());
@@ -549,6 +550,8 @@ public class InviteServiceImpl extends ServiceImpl<LedgerInviteMapper, LedgerInv
         resp.setLedgerUuid(ledger.getUuid());
         resp.setLedgerName(ledger.getName());
         resp.setLedgerBaseCurrencyCode(ledger.getBaseCurrencyCode());
+        resp.setLedgerExchangeRateToCny(com.simon.ledger.common.CurrencyRates.baseRateToCny(ledger));
+        resp.setLedgerCurrencyRatesToCny(com.simon.ledger.common.CurrencyRates.effective(ledger));
         resp.setLedgerMemberCount(members.size());
         resp.setLedgerMembers(members.stream()
                 .map(member -> toMemberSummary(member, userMap.get(member.getUserId())))
@@ -579,7 +582,7 @@ public class InviteServiceImpl extends ServiceImpl<LedgerInviteMapper, LedgerInv
     private InviteMemberSummaryResp toMemberSummary(LedgerMember member, UserAccount user) {
         InviteMemberSummaryResp resp = new InviteMemberSummaryResp();
         resp.setNickname(user == null ? null : user.getNickname());
-        resp.setAvatar(user == null ? null : user.getAvatar());
+        resp.setAvatar(user == null ? null : com.simon.ledger.common.InputValues.avatar(user.getAvatar()));
         resp.setRole(member.getRole());
         return resp;
     }

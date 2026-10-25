@@ -15,6 +15,14 @@ public class AdminAuditLogResp {
 
     private String target;
 
+    private String targetUuid;
+
+    private String targetAccount;
+
+    private Boolean previousValue;
+
+    private Boolean newValue;
+
     private String level;
 
     private LocalDateTime createdAt;

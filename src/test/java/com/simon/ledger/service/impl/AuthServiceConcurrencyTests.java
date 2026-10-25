@@ -361,13 +361,13 @@ class AuthServiceConcurrencyTests {
     }
 
     @Test
-    void profileUpdateUsesIndependentRequiresNewTransactionsForRealRetryBoundaries() throws Exception {
+    void profileUpdateParticipatesInOuterTransactionAndStartsOwnWhenStandalone() throws Exception {
         Method method = AuthServiceImpl.class.getMethod("updateProfile", AuthProfileUpdateReq.class);
         assertEquals(null, method.getAnnotation(org.springframework.transaction.annotation.Transactional.class));
         TransactionTemplate template = (TransactionTemplate) ReflectionTestUtils.getField(
                 service, "profileUpdateTransactions");
         assertNotNull(template);
-        assertEquals(TransactionDefinition.PROPAGATION_REQUIRES_NEW, template.getPropagationBehavior());
+        assertEquals(TransactionDefinition.PROPAGATION_REQUIRED, template.getPropagationBehavior());
     }
 
     private void verifyUserUpdateWrapper(int expectedVersion) {

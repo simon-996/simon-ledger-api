@@ -28,6 +28,28 @@ import java.util.List;
 
 class DeepSeekDraftClientTests {
     @Test
+    void relativeDatesReceiveExplicitLocalReferenceTime() throws Exception {
+        HttpClient http = mock(HttpClient.class);
+        when(http.send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class)))
+                .thenThrow(new IOException("stop after capturing request"));
+        var client = new DeepSeekDraftClient(new AiProviderConfig("key", "model", "", ""), new ObjectMapper(), http);
+        assertThrows(BusinessException.class, () -> client.parse("昨天早餐18元", ZoneId.of("Asia/Shanghai"), "CNY"));
+        var request = org.mockito.ArgumentCaptor.forClass(HttpRequest.class);
+        verify(http).send(request.capture(), any());
+        var body = new java.io.ByteArrayOutputStream();
+        request.getValue().bodyPublisher().orElseThrow().subscribe(new java.util.concurrent.Flow.Subscriber<java.nio.ByteBuffer>() {
+            public void onSubscribe(java.util.concurrent.Flow.Subscription subscription) { subscription.request(Long.MAX_VALUE); }
+            public void onNext(java.nio.ByteBuffer buffer) { byte[] bytes = new byte[buffer.remaining()]; buffer.get(bytes); body.writeBytes(bytes); }
+            public void onError(Throwable error) { throw new AssertionError(error); }
+            public void onComplete() {}
+        });
+        var envelope = new ObjectMapper().readTree(body.toString(java.nio.charset.StandardCharsets.UTF_8));
+        var input = new ObjectMapper().readTree(envelope.path("input").asText());
+        org.junit.jupiter.api.Assertions.assertTrue(input.path("referenceNow").asText().matches(".*T.*\\+08:00.*"));
+        org.junit.jupiter.api.Assertions.assertTrue(envelope.path("instructions").asText().contains("referenceNow"));
+    }
+
+    @Test
     void untrustedProviderStatusCannotExposeUserTextOrKeysInLogs() throws Exception {
         HttpClient http = mock(HttpClient.class);
         HttpResponse<String> response = mock(HttpResponse.class);

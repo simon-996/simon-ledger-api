@@ -8,10 +8,12 @@ import com.baomidou.mybatisplus.annotation.TableName;
 import lombok.Data;
 
 import java.math.BigDecimal;
+import java.util.Map;
+import com.simon.ledger.config.mybatis.CurrencyRatesTypeHandler;
 import java.time.LocalDateTime;
 
 @Data
-@TableName("ledger")
+@TableName(value = "ledger", autoResultMap = true)
 public class Ledger {
 
     @TableId(type = IdType.AUTO)
@@ -24,6 +26,9 @@ public class Ledger {
     private String baseCurrencyCode;
 
     private BigDecimal exchangeRateToCny;
+
+    @TableField(typeHandler = CurrencyRatesTypeHandler.class)
+    private Map<String, BigDecimal> currencyRatesToCny;
 
     private Long ownerUserId;
 

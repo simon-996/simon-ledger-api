@@ -17,7 +17,7 @@ public class PersonUpdateReq {
     @Size(max = 64, message = "参与人名称不能超过 64 个字符")
     private String name;
 
-    @Size(max = 64, message = "头像不能超过 64 个字符")
+    @Size(max = 255, message = "头像不能超过 255 个字符")
     private String avatar;
 
     private String linkedUserUuid;

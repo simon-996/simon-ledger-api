@@ -19,7 +19,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.test.util.ReflectionTestUtils;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
@@ -33,6 +33,9 @@ class AdminAiAccessServiceTests {
 
     @BeforeEach
     void setup() {
+        if (com.baomidou.mybatisplus.core.metadata.TableInfoHelper.getTableInfo(UserAccount.class) == null)
+            com.baomidou.mybatisplus.core.metadata.TableInfoHelper.initTableInfo(new org.apache.ibatis.builder.MapperBuilderAssistant(new com.baomidou.mybatisplus.core.MybatisConfiguration(), ""), UserAccount.class);
+
         service = new AdminServiceImpl(operationLogMapper, userAccountMapper, null, null,
                 null, null, null, null, null);
         ReflectionTestUtils.setField(service, "baseMapper", adminUserMapper);
@@ -60,12 +63,18 @@ class AdminAiAccessServiceTests {
         user.setAiBookkeepingEnabled(false);
         when(adminUserMapper.selectById(2L)).thenReturn(admin);
         when(userAccountMapper.selectOne(any(Wrapper.class))).thenReturn(user);
+        when(userAccountMapper.update(isNull(), any())).thenReturn(1);
         try (MockedStatic<StpUtil> login = mockStatic(StpUtil.class)) {
             login.when(StpUtil::getLoginId).thenReturn("admin:2");
             service.setAiBookkeepingAccess("target", true);
             service.setAiBookkeepingAccess("target", true);
         }
-        verify(userAccountMapper, times(1)).updateById(user);
+        verify(userAccountMapper, never()).updateById(any(UserAccount.class));
+        ArgumentCaptor<com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper<UserAccount>> update = ArgumentCaptor.forClass(com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper.class);
+        verify(userAccountMapper).update(isNull(), update.capture());
+        assertTrue(update.getValue().getSqlSet().contains("ai_bookkeeping_enabled"));
+        assertFalse(update.getValue().getSqlSet().contains("nickname"));
+        assertFalse(update.getValue().getSqlSet().contains("version"));
         ArgumentCaptor<AdminOperationLog> log = ArgumentCaptor.forClass(AdminOperationLog.class);
         verify(operationLogMapper, times(1)).insert(log.capture());
         assertEquals("ai_bookkeeping_grant", log.getValue().getAction());

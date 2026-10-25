@@ -153,17 +153,24 @@ public class AdminServiceImpl extends ServiceImpl<AdminUserMapper, AdminUser> im
         AdminUser admin = currentAdmin();
         UserAccount user = userAccountMapper.selectOne(Wrappers.<UserAccount>lambdaQuery()
                 .eq(UserAccount::getUuid, uuid)
-                .isNull(UserAccount::getDeletedAt));
+                .isNull(UserAccount::getDeletedAt)
+                .last("FOR UPDATE"));
         if (user == null) {
             throw new BusinessException(ErrorCode.NOT_FOUND, "用户不存在");
         }
         if (Boolean.TRUE.equals(user.getAiBookkeepingEnabled()) == enabled) {
             return;
         }
+        boolean previous = Boolean.TRUE.equals(user.getAiBookkeepingEnabled());
+        if (userAccountMapper.update(null, Wrappers.<UserAccount>lambdaUpdate()
+                .eq(UserAccount::getId, user.getId())
+                .isNull(UserAccount::getDeletedAt)
+                .set(UserAccount::getAiBookkeepingEnabled, enabled)) != 1) {
+            throw new BusinessException(ErrorCode.CONFLICT, "用户状态已变化，请重试");
+        }
         user.setAiBookkeepingEnabled(enabled);
-        userAccountMapper.updateById(user);
         recordOperation(admin.getId(), enabled ? "ai_bookkeeping_grant" : "ai_bookkeeping_revoke",
-                "user_account", uuid, enabled ? "授权 AI 记账" : "撤销 AI 记账授权");
+                "user_account", uuid, enabled ? "授权 AI 记账" : "撤销 AI 记账授权", previous, enabled);
     }
 
     @Override
@@ -194,8 +201,13 @@ public class AdminServiceImpl extends ServiceImpl<AdminUserMapper, AdminUser> im
                 new Page<>(page(page), pageSize(pageSize)),
                 Wrappers.<AdminOperationLog>lambdaQuery().orderByDesc(AdminOperationLog::getCreatedAt));
         Map<Long, AdminUser> adminMap = adminMap(result.getRecords());
+        List<String> targetUuids = result.getRecords().stream().filter(log -> "user_account".equals(log.getTargetType()))
+                .map(AdminOperationLog::getTargetUuid).filter(java.util.Objects::nonNull).distinct().toList();
+        Map<String, UserAccount> targets = targetUuids.isEmpty() ? Map.of()
+                : userAccountMapper.selectList(Wrappers.<UserAccount>lambdaQuery().in(UserAccount::getUuid, targetUuids))
+                .stream().collect(Collectors.toMap(UserAccount::getUuid, Function.identity()));
         List<AdminAuditLogResp> records = result.getRecords().stream()
-                .map(log -> toAuditLogResp(log, adminMap.get(log.getAdminUserId())))
+                .map(log -> toAuditLogResp(log, adminMap.get(log.getAdminUserId()), targets.get(log.getTargetUuid())))
                 .toList();
         return pageResp(result, records);
     }
@@ -277,16 +289,20 @@ public class AdminServiceImpl extends ServiceImpl<AdminUserMapper, AdminUser> im
         resp.setTransactionCount(countInt(ledgerTransactionMapper.selectCount(Wrappers.<LedgerTransaction>lambdaQuery()
                 .eq(LedgerTransaction::getLedgerId, ledger.getId())
                 .isNull(LedgerTransaction::getDeletedAt))));
-        resp.setStatus("synced");
+        resp.setStatus("cloud_saved");
         resp.setUpdatedAt(ledger.getUpdatedAt());
         return resp;
     }
 
-    private AdminAuditLogResp toAuditLogResp(AdminOperationLog log, AdminUser admin) {
+    private AdminAuditLogResp toAuditLogResp(AdminOperationLog log, AdminUser admin, UserAccount target) {
         AdminAuditLogResp resp = new AdminAuditLogResp();
         resp.setUuid(log.getUuid());
         resp.setActor(admin == null ? "system" : admin.getAccount());
         resp.setAction(log.getAction());
+        resp.setTargetUuid(log.getTargetUuid());
+        resp.setTargetAccount(target == null ? null : account(target));
+        resp.setPreviousValue(log.getPreviousValue());
+        resp.setNewValue(log.getNewValue());
         resp.setTarget(StringUtils.hasText(log.getDetail()) ? log.getDetail() : log.getTargetType());
         resp.setLevel("info");
         resp.setCreatedAt(log.getCreatedAt());
@@ -312,6 +328,10 @@ public class AdminServiceImpl extends ServiceImpl<AdminUserMapper, AdminUser> im
     }
 
     private void recordOperation(Long adminUserId, String action, String targetType, String targetUuid, String detail) {
+        recordOperation(adminUserId, action, targetType, targetUuid, detail, null, null);
+    }
+
+    private void recordOperation(Long adminUserId, String action, String targetType, String targetUuid, String detail, Boolean previous, Boolean next) {
         AdminOperationLog log = new AdminOperationLog();
         log.setUuid(IdUtil.fastSimpleUUID());
         log.setAdminUserId(adminUserId);
@@ -319,6 +339,8 @@ public class AdminServiceImpl extends ServiceImpl<AdminUserMapper, AdminUser> im
         log.setTargetType(targetType);
         log.setTargetUuid(targetUuid);
         log.setDetail(detail);
+        log.setPreviousValue(previous);
+        log.setNewValue(next);
         log.setIpAddress(ipAddress());
         log.setCreatedAt(LocalDateTime.now());
         adminOperationLogMapper.insert(log);

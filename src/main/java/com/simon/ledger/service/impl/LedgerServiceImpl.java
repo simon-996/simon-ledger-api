@@ -5,6 +5,8 @@ import cn.hutool.core.util.IdUtil;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.simon.ledger.common.ErrorCode;
+import com.simon.ledger.common.CurrencyRates;
+import com.simon.ledger.config.mybatis.CurrencyRatesTypeHandler;
 import com.simon.ledger.common.LedgerRoles;
 import com.simon.ledger.common.exception.BusinessException;
 import com.simon.ledger.common.exception.VersionConflictException;
@@ -84,8 +86,9 @@ public class LedgerServiceImpl extends ServiceImpl<LedgerMapper, Ledger> impleme
         Ledger ledger = new Ledger();
         ledger.setUuid(IdUtil.fastSimpleUUID());
         ledger.setName(req.getName().trim());
-        ledger.setBaseCurrencyCode(req.getBaseCurrencyCode().trim().toUpperCase());
+        ledger.setBaseCurrencyCode(CurrencyRates.code(req.getBaseCurrencyCode()));
         ledger.setExchangeRateToCny(req.getExchangeRateToCny());
+        ledger.setCurrencyRatesToCny(CurrencyRates.merge(Map.of(), req.getCurrencyRatesToCny(), ledger.getBaseCurrencyCode(), req.getExchangeRateToCny()));
         ledger.setOwnerUserId(userId);
         save(ledger);
 
@@ -109,6 +112,7 @@ public class LedgerServiceImpl extends ServiceImpl<LedgerMapper, Ledger> impleme
         ledgerReq.setName(req.getName());
         ledgerReq.setBaseCurrencyCode(req.getBaseCurrencyCode());
         ledgerReq.setExchangeRateToCny(req.getExchangeRateToCny());
+        ledgerReq.setCurrencyRatesToCny(req.getCurrencyRatesToCny());
 
         LedgerResp ledger = create(ledgerReq);
         List<PersonResp> people = (req.getPeople() == null ? List.<PersonCreateReq>of() : req.getPeople())
@@ -144,7 +148,8 @@ public class LedgerServiceImpl extends ServiceImpl<LedgerMapper, Ledger> impleme
         }
 
         String name = req.getName().trim();
-        String currencyCode = req.getBaseCurrencyCode().trim().toUpperCase();
+        String currencyCode = CurrencyRates.code(req.getBaseCurrencyCode());
+        var rates = CurrencyRates.merge(CurrencyRates.effective(ledger), req.getCurrencyRatesToCny(), currencyCode, req.getExchangeRateToCny());
         LocalDateTime updatedAt = LocalDateTime.now();
         int nextVersion = req.getVersion() + 1;
         int affected = baseMapper.update(null, Wrappers.<Ledger>lambdaUpdate()
@@ -154,6 +159,7 @@ public class LedgerServiceImpl extends ServiceImpl<LedgerMapper, Ledger> impleme
                 .set(Ledger::getName, name)
                 .set(Ledger::getBaseCurrencyCode, currencyCode)
                 .set(Ledger::getExchangeRateToCny, req.getExchangeRateToCny())
+                .set(Ledger::getCurrencyRatesToCny, CurrencyRatesTypeHandler.toJson(rates))
                 .set(Ledger::getVersion, nextVersion)
                 .set(Ledger::getUpdatedAt, updatedAt));
         if (affected == 0) {
@@ -162,6 +168,7 @@ public class LedgerServiceImpl extends ServiceImpl<LedgerMapper, Ledger> impleme
         ledger.setName(name);
         ledger.setBaseCurrencyCode(currencyCode);
         ledger.setExchangeRateToCny(req.getExchangeRateToCny());
+        ledger.setCurrencyRatesToCny(rates);
         ledger.setVersion(nextVersion);
         ledger.setUpdatedAt(updatedAt);
         changeLogService.record(ledger.getId(), "ledger", ledger.getUuid(), "update", userId);
@@ -214,7 +221,8 @@ public class LedgerServiceImpl extends ServiceImpl<LedgerMapper, Ledger> impleme
         }
 
         String name = req.getName().trim();
-        String currencyCode = req.getBaseCurrencyCode().trim().toUpperCase();
+        String currencyCode = CurrencyRates.code(req.getBaseCurrencyCode());
+        var rates = CurrencyRates.merge(CurrencyRates.effective(ledger), req.getCurrencyRatesToCny(), currencyCode, req.getExchangeRateToCny());
         LocalDateTime updatedAt = LocalDateTime.now();
         int nextVersion = req.getVersion() + 1;
         int affected = baseMapper.update(null, Wrappers.<Ledger>lambdaUpdate()
@@ -224,6 +232,7 @@ public class LedgerServiceImpl extends ServiceImpl<LedgerMapper, Ledger> impleme
                 .set(Ledger::getName, name)
                 .set(Ledger::getBaseCurrencyCode, currencyCode)
                 .set(Ledger::getExchangeRateToCny, req.getExchangeRateToCny())
+                .set(Ledger::getCurrencyRatesToCny, CurrencyRatesTypeHandler.toJson(rates))
                 .set(Ledger::getDeletedAt, null)
                 .set(Ledger::getUpdatedAt, updatedAt)
                 .set(Ledger::getVersion, nextVersion));
@@ -233,6 +242,7 @@ public class LedgerServiceImpl extends ServiceImpl<LedgerMapper, Ledger> impleme
         ledger.setName(name);
         ledger.setBaseCurrencyCode(currencyCode);
         ledger.setExchangeRateToCny(req.getExchangeRateToCny());
+        ledger.setCurrencyRatesToCny(rates);
         ledger.setDeletedAt(null);
         ledger.setUpdatedAt(updatedAt);
         ledger.setVersion(nextVersion);
@@ -443,7 +453,8 @@ public class LedgerServiceImpl extends ServiceImpl<LedgerMapper, Ledger> impleme
         resp.setUuid(ledger.getUuid());
         resp.setName(ledger.getName());
         resp.setBaseCurrencyCode(ledger.getBaseCurrencyCode());
-        resp.setExchangeRateToCny(ledger.getExchangeRateToCny());
+        resp.setExchangeRateToCny(CurrencyRates.baseRateToCny(ledger));
+        resp.setCurrencyRatesToCny(CurrencyRates.effective(ledger));
         resp.setVersion(ledger.getVersion());
         resp.setRole(role);
         resp.setMemberCount(members.size());

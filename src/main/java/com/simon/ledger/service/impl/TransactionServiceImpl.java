@@ -39,6 +39,7 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
@@ -82,7 +83,8 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
         this.userAccountMapper = userAccountMapper;
         this.changeLogService = changeLogService;
         this.createTransactions = new TransactionTemplate(transactionManager);
-        this.createTransactions.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        this.createTransactions.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRED);
+        this.createTransactions.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
     }
 
     @Override
@@ -128,6 +130,7 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
     @Override
     public TransactionResp create(String ledgerUuid, TransactionCreateReq req) {
         Long userId = StpUtil.getLoginIdAsLong();
+        boolean participating = TransactionSynchronizationManager.isActualTransactionActive();
         for (int attempt = 1; attempt <= MAX_CREATE_ATTEMPTS; attempt++) {
             try {
                 TransactionResp response = createTransactions.execute(
@@ -137,6 +140,9 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
                 }
                 return response;
             } catch (CreateOperationDuplicateSignal signal) {
+                if (participating) {
+                    throw new BusinessException(ErrorCode.CONFLICT, "并发状态变化，请重试原请求");
+                }
                 if (attempt == MAX_CREATE_ATTEMPTS) {
                     throw new BusinessException(ErrorCode.CONFLICT, "流水创建冲突，请重试");
                 }
@@ -152,6 +158,7 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
             throw new BusinessException(ErrorCode.FORBIDDEN);
         }
         validateType(req.getType());
+        com.simon.ledger.common.InputValues.amount(req.getAmount());
         LedgerTransaction exists = findByClientOperationId(ledger.getId(), userId, req.getClientOperationId());
         if (exists != null) {
             Map<Long, UserAccount> lockedUsers = lockResponseUsers(exists);
@@ -220,6 +227,7 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
             throw transactionConflict(ledger, transaction, req.getVersion(), null);
         }
         validateType(req.getType());
+        com.simon.ledger.common.InputValues.amount(req.getAmount());
         Map<Long, UserAccount> lockedUsers = lockMutationUsers(transaction, userId);
         LockedPeople lockedPeople = lockRequestedPeople(
                 ledger.getId(), req.getType(), req.getPayerPersonUuid(), req.getPersonUuids());
@@ -306,6 +314,7 @@ public class TransactionServiceImpl extends ServiceImpl<LedgerTransactionMapper,
             throw transactionConflict(ledger, transaction, req.getVersion(), null);
         }
         validateType(req.getType());
+        com.simon.ledger.common.InputValues.amount(req.getAmount());
         Map<Long, UserAccount> lockedUsers = lockMutationUsers(transaction, userId);
         LockedPeople lockedPeople = lockRequestedPeople(
                 ledger.getId(), req.getType(), req.getPayerPersonUuid(), req.getPersonUuids());

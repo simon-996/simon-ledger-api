@@ -180,7 +180,7 @@ simon-ledger: <token>
 src/main/resources/application-prod.yml.example
 ```
 
-全新数据库直接执行当前 `001_init_schema.sql`（Fresh 001），其中已经包含流水付款人字段、五类实体的 `version` 字段和流水 `clientOperationId` 的 active-only 唯一键；随后按需执行 `003_add_admin_console.sql`。不要再对这类全新结构执行 `002`、`004` 或 `005`，否则会重复添加已有字段或索引。
+全新数据库直接执行当前 `001_init_schema.sql`（Fresh 001），其中已经包含流水付款人字段、五类实体的 `version` 字段和流水 `clientOperationId` 的 active-only 唯一键；随后必须依次执行 `003_add_admin_console.sql`、`006_anonymize_deleted_accounts.sql`、`007_add_ai_bookkeeping_access.sql`、`008_add_currency_rates_to_cny.sql`。即使不启用 AI，当前实体查询也依赖 007 的授权列；008 的汇率和审计列同样是新版 API 的基本结构。不要再对这类全新结构执行 `002`、`004` 或 `005`，否则会重复添加已有字段或索引。
 
 历史数据库只执行尚未应用的增量脚本，并严格按编号顺序升级：
 
@@ -189,6 +189,9 @@ sql/002_add_transaction_payer.sql
 sql/003_add_admin_console.sql
 sql/004_add_optimistic_versions.sql
 sql/005_add_transaction_operation_uniqueness.sql
+sql/006_anonymize_deleted_accounts.sql
+sql/007_add_ai_bookkeeping_access.sql
+sql/008_add_currency_rates_to_cny.sql
 ```
 
 `004_add_optimistic_versions.sql` 升级完成后，`user_account`、`ledger`、`ledger_member`、`ledger_person`、`ledger_transaction` 的 `version` 都应为 `INT NOT NULL DEFAULT 1`。
@@ -217,13 +220,16 @@ mvn test
 mvn spring-boot:run
 ```
 
-可选的 `AdminAccountDeletionMySqlIntegrationTests` 会清空测试库中的账本和账号表；只能对一次性 MySQL 实例运行。先创建名为 `simon_ledger_integration` 的独立库，用 `001`、`003`、`006` 的 DDL 初始化（将脚本中的库名替换为测试库名），然后设置 `LEDGER_DELETION_TEST_DB_URL`、`LEDGER_DELETION_TEST_DB_USER`、`LEDGER_DELETION_TEST_DB_PASSWORD` 并执行 `mvn -Dtest=AdminAccountDeletionMySqlIntegrationTests test`。未设置 URL 时，普通 `mvn test` 会跳过这组破坏性集成测试。
+可选的 `AdminAccountDeletionMySqlIntegrationTests` 会清空测试库中的账本和账号表；只能对一次性 MySQL 实例运行。先创建名为 `simon_ledger_integration` 的独立库，用当前 `001`、`003`、`006`、`007`、`008` 的 DDL 初始化（将脚本中的库名替换为测试库名），然后设置 `LEDGER_DELETION_TEST_DB_URL`、`LEDGER_DELETION_TEST_DB_USER`、`LEDGER_DELETION_TEST_DB_PASSWORD` 并执行 `mvn -Dtest=AdminAccountDeletionMySqlIntegrationTests test`。未设置 URL 时，普通 `mvn test` 会跳过这组破坏性集成测试。
 
 ## Docker
 
 Build image:
 
 ```bash
+# Requires JDK 21; do not inherit destructive DB integration settings.
+env -u LEDGER_DELETION_TEST_DB_URL -u LEDGER_DELETION_TEST_DB_USER -u LEDGER_DELETION_TEST_DB_PASSWORD \
+  mvn -Dspring.profiles.active=test clean package
 docker build -t simon-ledger-api:latest .
 ```
 
@@ -231,6 +237,7 @@ Run container:
 
 ```bash
 docker run --rm -p 18080:18080 \
+  --env-file /absolute/private/path/api.env \
   -e SPRING_PROFILES_ACTIVE=prod \
   -e JAVA_OPTS="-Xms256m -Xmx512m" \
   simon-ledger-api:latest
@@ -238,9 +245,9 @@ docker run --rm -p 18080:18080 \
 
 ## API 服务器部署与 AI 环境变量
 
-服务器部署脚本为 `scripts/deploy-server.sh`，读取 `/apps/simon_ledger/app.tar.gz`，并通过 `--env-file` 将 `/apps/simon_ledger/secrets/api.env` 加载到新容器。可用 `ENV_FILE` 指定其他私有环境文件。环境文件缺失时，脚本会在停止现有容器前退出。
+服务器部署脚本为 `scripts/deploy-server.sh`，读取 `/apps/simon_ledger/app.tar.gz`，并通过 `--env-file` 将 `/apps/simon_ledger/secrets/api.env` 加载到新容器。可用 `ENV_FILE` 指定其他私有环境文件。环境文件缺失、打包文件缺失、日志目录不可写或镜像构建失败时，脚本会在停止现有容器前退出。部署压缩包仍使用根目录 `Dockerfile` 和 `app.jar`，服务器构建显式传入 `--build-arg APP_JAR=app.jar`；仓库直接构建默认读取 `target/app.jar`。
 
-在环境文件中配置 `DEEPSEEK_API_KEY`、`TENCENT_ASR_SECRET_ID`、`TENCENT_ASR_SECRET_KEY`，可选配置 `DEEPSEEK_MODEL`。私有目录权限设为 `700`，环境文件权限设为 `600`。真实密钥由每个部署环境单独维护；`*.env` 已加入 Git 忽略规则。
+在环境文件中配置 `DEEPSEEK_API_KEY`、`TENCENT_ASR_SECRET_ID`、`TENCENT_ASR_SECRET_KEY`，可选配置 `DEEPSEEK_MODEL`。私有目录权限设为 `700`，环境文件权限设为 `600`。应用以 uid `10001` 运行，部署前确保 `/apps/simon_ledger/logs` 由该 uid 可写（例如由服务器管理员设置该目录所有权）；镜像将 `/app/logs` 链接到持久化 `/logs`，发布脚本会在停止旧容器前实测挂载目录写权限。真实密钥由每个部署环境单独维护；`*.env` 已加入 Git 忽略规则。
 
 构建并上传新 `app.tar.gz` 后，安装并执行服务器脚本：
 
@@ -249,7 +256,9 @@ scp scripts/deploy-server.sh root@simon996.com:/apps/simon_ledger/scripts/deploy
 ssh root@simon996.com 'chmod +x /apps/simon_ledger/scripts/deploy_api.sh && bash /apps/simon_ledger/scripts/deploy_api.sh'
 ```
 
-普通容器重启保留环境变量。重新部署会重建容器，因此必须再次使用这个脚本加载环境文件。脚本只替换 API 应用目录，不修改独立的私有环境文件。
+普通容器重启保留环境变量。重新部署会重建容器，因此必须再次使用这个脚本加载环境文件。脚本先构建带唯一发布标签的镜像，再停止并改名保留上一容器。新容器启动后会检查进程存活及本机 `/health` 的成功响应（默认最多 60 次、间隔 2 秒）；启动失败或健康检查失败则移除新容器并恢复上一容器。只有通过门禁后才替换应用目录并清理旧容器，原应用目录保留为带时间戳的 `api.previous.*`。`HEALTH_URL`、`HEALTH_ATTEMPTS`、`HEALTH_INTERVAL` 可按环境调整；健康接口只确认 API 存活，数据库结构检查和迁移必须在发布前完成。
+
+数据库迁移不能靠回滚容器撤销。升级 008 前停止旧 API、备份并检查迁移状态，再对数据库执行一次 008，随后发布新版 API；本仓库不会自动连接或升级生产数据库。回退应用前确认它能兼容新增结构。迁移会将旧版遗留的 `response_code=-1` 标为失效并保留幂等键，避免不确定业务结果被重做。
 
 ## 生产跨域配置
 
@@ -279,3 +288,16 @@ curl -i -X OPTIONS 'https://ledger-api.simon996.com/api/admin/auth/login' \
 - Remote: `git@github.com:simon-996/simon-ledger-api.git`
 - Default branch: `master`
 - Commit message style: `feat: ...`、`fix: ...`、`docs: ...`
+
+
+## 手动币种汇率与统计
+
+账本请求和响应新增 `currencyRatesToCny`，例如 `{ "CNY": 1, "USD": 7, "EUR": 8 }`，表示一单位该币种可兑换多少人民币。`exchangeRateToCny` 继续表示当前 `baseCurrencyCode` 的汇率，并覆盖映射中的同名键。更新合并已有映射并保留旧基础币种汇率；CNY 永远为 1；旧 CNY 账本中非 1 的兼容汇率在迁移和读取时归一为 1，账本及邀请响应的兼容汇率也返回 1，新写入仍拒绝非 1 的 CNY 汇率。映射最多 32 项，代码兼容标准三字母及原有的 3–16 位字母数字代码（首位为字母，统一转为大写，例如 `USDT`），汇率至少 `0.00000001`，最多 10 位整数、8 位小数；错误或缺失汇率会返回 400，请先维护汇率，不使用 1:1 替代。
+
+流水始终保留原币金额。三个统计接口统一返回 `currencyCode: "CNY"`；每笔先按最新映射换算并以 HALF_UP 量化到两位小数，再合计。人员分摊按最小单位分配，余数依 `personUuid` 字典序分配，确保每笔金额守恒。金额入口拒绝超过 16 位整数或 2 位小数的值。
+
+008 会回填账本原基础币种汇率、统一账号/人员头像为 255 字符且默认空字符串，并增加审计授权前后值。数据库 JSON 映射内部使用十进制字符串，类型处理器还原为 `BigDecimal`，API 仍输出 JSON 数值。幂等响应改为 MEDIUMTEXT 保存精确序列化 JSON，避免 MySQL 二进制 JSON 把 18 位金额或汇率转换为浮点后丢失精度。后台接手人包含 `account`；审计包含 `targetUuid`、`targetAccount`、`previousValue`、`newValue`，账号永久删除后目标标识匿名化。
+
+## AI 请求资源边界
+
+音频在权限检查后最多读取 `1,920,001` 字节，实际 PCM 上限为 1,920,000 字节（16 kHz、16-bit、单声道 60 秒）；已知超长 Content-Length 在读取前拒绝，分块请求同样受读取上限约束。文字请求在反序列化前鉴权并限制为 32 KiB，文字描述仍为 1–1000 字。供应商调用共用并发门禁，默认每账号 1 个、每 API 实例 4 个，超限立即拒绝，不排队积压；使用 `LEDGER_AI_CONCURRENT_USER_LIMIT`、`LEDGER_AI_CONCURRENT_INSTANCE_LIMIT` 调整。多副本部署时该并发上限按实例生效，Redis 日额度仍为共享限制。请求完成或异常都会释放许可。供应商输入包含指定时区的 `referenceNow`，相对日期以该本地日期解释。

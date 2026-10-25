@@ -7,6 +7,8 @@ import java.math.BigDecimal;
 @Data
 public class StatsSummaryResp {
 
+    private String currencyCode = "CNY";
+
     private String ledgerUuid;
 
     private BigDecimal expense;

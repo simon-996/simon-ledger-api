@@ -152,6 +152,7 @@ class ConflictResponseContractTests {
         snapshot.setName("远端账本");
         snapshot.setBaseCurrencyCode("CNY");
         snapshot.setExchangeRateToCny(new BigDecimal("1.00000000"));
+        snapshot.setCurrencyRatesToCny(java.util.Map.of("CNY", BigDecimal.ONE, "USD", new BigDecimal("7")));
         snapshot.setVersion(4);
         snapshot.setRole("owner");
         snapshot.setMemberCount(1);
@@ -162,12 +163,13 @@ class ConflictResponseContractTests {
         JsonNode root = conflictJson("ledger", "ledger-uuid", 3, 4, false, snapshot);
 
         JsonNode remote = assertCommonContract(root, "ledger", "ledger-uuid", 3, 4, false);
-        assertExactFields(remote, "uuid", "name", "baseCurrencyCode", "exchangeRateToCny", "version",
+        assertExactFields(remote, "uuid", "name", "baseCurrencyCode", "exchangeRateToCny", "currencyRatesToCny", "version",
                 "role", "memberCount", "members", "createdAt", "updatedAt");
         assertText(remote, "uuid", "ledger-uuid");
         assertText(remote, "name", "远端账本");
         assertText(remote, "baseCurrencyCode", "CNY");
         assertNumber(remote, "exchangeRateToCny", new BigDecimal("1.00000000"));
+        assertNumber(remote.path("currencyRatesToCny"), "USD", new BigDecimal("7"));
         assertInteger(remote, "version", 4);
         assertText(remote, "role", "owner");
         assertInteger(remote, "memberCount", 1);

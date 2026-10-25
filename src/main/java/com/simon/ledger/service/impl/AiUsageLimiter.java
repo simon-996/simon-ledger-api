@@ -23,6 +23,34 @@ public class AiUsageLimiter {
     private final StringRedisTemplate redis;
     private final int perUserLimit;
     private final int globalLimit;
+    @Value("${ledger.ai.concurrent-user-limit:1}") private int concurrentUserLimit = 1;
+    @Value("${ledger.ai.concurrent-instance-limit:4}") private int concurrentInstanceLimit = 4;
+    private final java.util.Map<Long, Integer> activeUsers = new java.util.HashMap<>();
+    private int activeRequests;
+
+    /** Per-instance admission is bounded and fail-fast; no queued request bodies accumulate. */
+    public synchronized Permit acquire(Long userId) {
+        int perUser = activeUsers.getOrDefault(userId, 0);
+        if (activeRequests >= concurrentInstanceLimit || perUser >= concurrentUserLimit) {
+            throw new BusinessException(ErrorCode.FORBIDDEN, "AI 请求正在处理中，请稍后重试");
+        }
+        activeRequests++;
+        activeUsers.put(userId, perUser + 1);
+        return new Permit(userId);
+    }
+    public final class Permit implements AutoCloseable {
+        private final Long userId;
+        private boolean closed;
+        private Permit(Long userId) { this.userId = userId; }
+        @Override public void close() {
+            synchronized (AiUsageLimiter.this) {
+                if (closed) return;
+                closed = true;
+                activeRequests--;
+                activeUsers.computeIfPresent(userId, (id, count) -> count == 1 ? null : count - 1);
+            }
+        }
+    }
 
     public AiUsageLimiter(StringRedisTemplate redis,
                           @Value("${ledger.ai.daily-user-limit:30}") int perUserLimit,

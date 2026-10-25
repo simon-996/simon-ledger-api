@@ -455,9 +455,6 @@ public class PersonServiceImpl extends ServiceImpl<LedgerPersonMapper, LedgerPer
     }
 
     private String normalizeAvatar(String avatar) {
-        if (!StringUtils.hasText(avatar)) {
-            return DEFAULT_AVATAR;
-        }
-        return avatar.trim();
+        return com.simon.ledger.common.InputValues.avatar(avatar);
     }
 }

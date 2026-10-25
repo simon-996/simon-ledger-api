@@ -12,6 +12,8 @@ import com.simon.ledger.service.IdempotencyService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.annotation.Isolation;
 import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
@@ -30,10 +32,9 @@ public class IdempotencyServiceImpl implements IdempotencyService {
     private final ObjectMapper objectMapper;
 
     @Override
+    @Transactional(rollbackFor = Exception.class, isolation = Isolation.READ_COMMITTED)
     public <T> T execute(String key, String method, String path, Class<T> responseType, Supplier<T> supplier) {
-        if (!StringUtils.hasText(key)) {
-            return supplier.get();
-        }
+        if (!StringUtils.hasText(key)) return supplier.get();
         String requestKey = normalizeRequestKey(key);
         Long userId = StpUtil.getLoginIdAsLong();
         IdempotencyRecord exists = existing(userId, requestKey);
@@ -42,49 +43,23 @@ public class IdempotencyServiceImpl implements IdempotencyService {
             return readResponse(exists, responseType);
         }
 
+        // Business locks (ledger -> account -> people) precede cache/FK locks. Nothing is
+        // committed until the reservation, business writes and serialized response all succeed.
+        // Concurrent callers may do speculative work; the losing unique-key insert aborts
+        // its entire transaction, so a retry can safely replay the winner's response.
+        T response = supplier.get();
         IdempotencyRecord record = processingRecord(userId, requestKey, method, path);
         if (!tryInsert(record)) {
-            return readExisting(userId, requestKey, method, path, responseType);
+            throw new BusinessException(ErrorCode.CONFLICT, "同一幂等键正在提交，请重试原请求");
         }
-
-        try {
-            T response = supplier.get();
-            completeRecord(record, response);
-            return response;
-        } catch (RuntimeException e) {
-            deleteRecord(record);
-            throw e;
-        }
+        completeRecord(record, response);
+        return response;
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class, isolation = Isolation.READ_COMMITTED)
     public void executeVoid(String key, String method, String path, Runnable runnable) {
-        if (!StringUtils.hasText(key)) {
-            runnable.run();
-            return;
-        }
-        String requestKey = normalizeRequestKey(key);
-        Long userId = StpUtil.getLoginIdAsLong();
-        IdempotencyRecord exists = existing(userId, requestKey);
-        if (exists != null) {
-            ensureSameRequest(exists, method, path);
-            readResponse(exists, Void.class);
-            return;
-        }
-
-        IdempotencyRecord record = processingRecord(userId, requestKey, method, path);
-        if (!tryInsert(record)) {
-            readExisting(userId, requestKey, method, path, Void.class);
-            return;
-        }
-
-        try {
-            runnable.run();
-            completeRecord(record, null);
-        } catch (RuntimeException e) {
-            deleteRecord(record);
-            throw e;
-        }
+        execute(key, method, path, Void.class, () -> { runnable.run(); return null; });
     }
 
     private IdempotencyRecord existing(Long userId, String key) {
@@ -112,7 +87,8 @@ public class IdempotencyServiceImpl implements IdempotencyService {
             throw new BusinessException(ErrorCode.CONFLICT, "缓存响应已失效，请使用新幂等键重新请求");
         }
         if (PROCESSING_CODE == record.getResponseCode()) {
-            throw new BusinessException(ErrorCode.CONFLICT, "请求正在处理中，请稍后重试");
+            throw new BusinessException(ErrorCode.CONFLICT, record.getExpiresAt() != null && record.getExpiresAt().isBefore(LocalDateTime.now())
+                    ? "旧请求结果无法确认，幂等键已保留，请刷新数据后处理" : "请求正在处理中，请稍后重试");
         }
         if (!StringUtils.hasText(record.getResponseBody())) {
             return null;
@@ -122,15 +98,6 @@ public class IdempotencyServiceImpl implements IdempotencyService {
         } catch (JsonProcessingException e) {
             throw new BusinessException(ErrorCode.SYSTEM_ERROR, "幂等响应解析失败");
         }
-    }
-
-    private <T> T readExisting(Long userId, String key, String method, String path, Class<T> responseType) {
-        IdempotencyRecord exists = existing(userId, key);
-        if (exists == null) {
-            throw new BusinessException(ErrorCode.CONFLICT, "请求正在处理中，请稍后重试");
-        }
-        ensureSameRequest(exists, method, path);
-        return readResponse(exists, responseType);
     }
 
     private IdempotencyRecord processingRecord(Long userId, String key, String method, String path) {
@@ -156,14 +123,13 @@ public class IdempotencyServiceImpl implements IdempotencyService {
     }
 
     private void completeRecord(IdempotencyRecord record, Object response) {
-        record.setResponseCode(SUCCESS_CODE);
-        record.setResponseBody(writeResponse(response));
-        idempotencyRecordMapper.updateById(record);
-    }
-
-    private void deleteRecord(IdempotencyRecord record) {
-        if (record.getId() != null) {
-            idempotencyRecordMapper.deleteById(record.getId());
+        int affected = idempotencyRecordMapper.update(null, Wrappers.<IdempotencyRecord>lambdaUpdate()
+                .eq(IdempotencyRecord::getId, record.getId())
+                .eq(IdempotencyRecord::getResponseCode, PROCESSING_CODE)
+                .set(IdempotencyRecord::getResponseCode, SUCCESS_CODE)
+                .set(IdempotencyRecord::getResponseBody, writeResponse(response)));
+        if (affected != 1) {
+            throw new BusinessException(ErrorCode.CONFLICT, "幂等响应已失效，请重试");
         }
     }
 

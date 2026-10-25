@@ -58,10 +58,12 @@ public class AiBookkeepingService {
                 people.selectList(Wrappers.<LedgerPerson>lambdaQuery()
                         .eq(LedgerPerson::getLedgerId, context.ledger().getId())
                         .isNull(LedgerPerson::getDeletedAt)));
-        limiter.consume("parse", context.user().getId());
-        String result = provider.parse(request.getText(), zone, context.ledger().getBaseCurrencyCode(), categories,
-                activePeople.stream().map(LedgerPerson::getName).toList());
-        return validator.validate(result, context.ledger(), context.user().getId(), zone,
-                activePeople, categories);
+        try (var permit = limiter.acquire(context.user().getId())) {
+            limiter.consume("parse", context.user().getId());
+            String result = provider.parse(request.getText(), zone, context.ledger().getBaseCurrencyCode(), categories,
+                    activePeople.stream().map(LedgerPerson::getName).toList());
+            return validator.validate(result, context.ledger(), context.user().getId(), zone,
+                    activePeople, categories);
+        }
     }
 }

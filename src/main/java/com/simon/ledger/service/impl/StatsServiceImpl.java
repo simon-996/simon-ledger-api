@@ -3,6 +3,7 @@ package com.simon.ledger.service.impl;
 import cn.dev33.satoken.stp.StpUtil;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.simon.ledger.common.ErrorCode;
+import com.simon.ledger.common.CurrencyRates;
 import com.simon.ledger.common.exception.BusinessException;
 import com.simon.ledger.dto.resp.CategoryStatsResp;
 import com.simon.ledger.dto.resp.PeopleBalanceResp;
@@ -52,8 +53,8 @@ public class StatsServiceImpl implements StatsService {
         Ledger ledger = requireLedgerAndMember(ledgerUuid, userId);
         List<LedgerTransaction> transactions = transactions(ledger.getId());
 
-        BigDecimal expense = sumByType(transactions, TYPE_EXPENSE);
-        BigDecimal income = sumByType(transactions, TYPE_INCOME);
+        BigDecimal expense = sumByType(ledger, transactions, TYPE_EXPENSE);
+        BigDecimal income = sumByType(ledger, transactions, TYPE_INCOME);
 
         StatsSummaryResp resp = new StatsSummaryResp();
         resp.setLedgerUuid(ledger.getUuid());
@@ -81,7 +82,7 @@ public class StatsServiceImpl implements StatsService {
                     resp.setCategory(entry.getKey().category());
                     resp.setType(entry.getKey().type());
                     resp.setAmount(scale(entry.getValue().stream()
-                            .map(LedgerTransaction::getAmount)
+                            .map(transaction -> CurrencyRates.toCny(ledger, transaction.getCurrencyCode(), transaction.getAmount()))
                             .reduce(BigDecimal.ZERO, BigDecimal::add)));
                     resp.setTransactionCount(entry.getValue().size());
                     return resp;
@@ -102,25 +103,32 @@ public class StatsServiceImpl implements StatsService {
         for (LedgerTransaction transaction : transactions) {
             List<Long> personIds = transactionPersonIds.getOrDefault(transaction.getId(), List.of()).stream()
                     .filter(personMap::containsKey)
+                    .distinct()
+                    .sorted(Comparator.comparing(id -> personMap.get(id).getUuid()))
                     .toList();
             if (personIds.isEmpty()) {
                 continue;
             }
-            BigDecimal splitAmount = transaction.getAmount().divide(BigDecimal.valueOf(personIds.size()), 2, RoundingMode.HALF_UP);
+            BigDecimal amount = CurrencyRates.toCny(ledger, transaction.getCurrencyCode(), transaction.getAmount());
+            var cents = amount.movePointRight(2).toBigIntegerExact().divideAndRemainder(java.math.BigInteger.valueOf(personIds.size()));
+            Map<Long, BigDecimal> shares = new LinkedHashMap<>();
+            for (int i = 0; i < personIds.size(); i++) {
+                shares.put(personIds.get(i), new BigDecimal(cents[0].add(i < cents[1].intValueExact() ? java.math.BigInteger.ONE : java.math.BigInteger.ZERO), 2));
+            }
             if (Objects.equals(transaction.getType(), TYPE_EXPENSE) && transaction.getPayerPersonId() != null) {
                 MutableBalance payerBalance = balanceMap.computeIfAbsent(transaction.getPayerPersonId(), ignored -> new MutableBalance());
-                payerBalance.income = payerBalance.income.add(transaction.getAmount());
+                payerBalance.income = payerBalance.income.add(amount);
                 for (Long personId : personIds) {
                     MutableBalance balance = balanceMap.computeIfAbsent(personId, ignored -> new MutableBalance());
-                    balance.expense = balance.expense.add(splitAmount);
+                    balance.expense = balance.expense.add(shares.get(personId));
                 }
             } else {
                 for (Long personId : personIds) {
                     MutableBalance balance = balanceMap.computeIfAbsent(personId, ignored -> new MutableBalance());
                     if (Objects.equals(transaction.getType(), TYPE_EXPENSE)) {
-                        balance.expense = balance.expense.add(splitAmount);
+                        balance.expense = balance.expense.add(shares.get(personId));
                     } else if (Objects.equals(transaction.getType(), TYPE_INCOME)) {
-                        balance.income = balance.income.add(splitAmount);
+                        balance.income = balance.income.add(shares.get(personId));
                     }
                 }
             }
@@ -167,10 +175,10 @@ public class StatsServiceImpl implements StatsService {
                 .isNull(LedgerTransaction::getDeletedAt));
     }
 
-    private BigDecimal sumByType(List<LedgerTransaction> transactions, int type) {
+    private BigDecimal sumByType(Ledger ledger, List<LedgerTransaction> transactions, int type) {
         return transactions.stream()
                 .filter(transaction -> Objects.equals(transaction.getType(), type))
-                .map(LedgerTransaction::getAmount)
+                .map(transaction -> CurrencyRates.toCny(ledger, transaction.getCurrencyCode(), transaction.getAmount()))
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
     }
 

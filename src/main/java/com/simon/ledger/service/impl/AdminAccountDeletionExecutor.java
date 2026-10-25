@@ -40,21 +40,26 @@ public class AdminAccountDeletionExecutor {
         if (!Objects.equals(userUuid, req.getConfirmUuid())) {
             throw new BusinessException(ErrorCode.BAD_REQUEST, "确认 UUID 与目标账号不一致");
         }
-        Long userId = oneLong("SELECT id FROM user_account WHERE uuid = ? FOR UPDATE", userUuid);
+        Long userId = oneLong("SELECT id FROM user_account WHERE uuid = ?", userUuid);
         if (userId == null) {
             throw new BusinessException(ErrorCode.NOT_FOUND, "用户不存在");
         }
 
-        List<Long> ledgerIds = jdbc.queryForList("""
-                SELECT id FROM ledger WHERE owner_user_id = ?
-                UNION SELECT ledger_id FROM ledger_member WHERE user_id = ?
-                UNION SELECT ledger_id FROM ledger_person WHERE linked_user_id = ?
-                ORDER BY id
-                """, Long.class, userId, userId, userId);
+        List<Long> ledgerIds = affectedLedgerIds(userId);
         for (Long ledgerId : ledgerIds) {
             if (oneLong("SELECT id FROM ledger WHERE id = ? FOR UPDATE", ledgerId) == null) {
                 throw new BusinessException(ErrorCode.CONFLICT, "账本状态已变化，请重新预览");
             }
+        }
+
+        // Match normal mutations: sorted ledger namespaces, then current account. A link
+        // committed while discovery waited must trigger a fresh preview instead of taking
+        // an additional ledger lock out of order.
+        if (oneLong("SELECT id FROM user_account WHERE id = ? AND uuid = ? FOR UPDATE", userId, userUuid) == null) {
+            throw new BusinessException(ErrorCode.NOT_FOUND, "用户不存在");
+        }
+        if (!ledgerIds.equals(affectedLedgerIds(userId))) {
+            throw new BusinessException(ErrorCode.CONFLICT, "关联账本已变化，请重新预览");
         }
 
         AdminAccountDeletionPreviewResp preview = previewService.preview(userUuid);
@@ -102,6 +107,7 @@ public class AdminAccountDeletionExecutor {
         jdbc.update("UPDATE ledger_change_log SET operator_user_id = NULL WHERE operator_user_id = ?", userId);
         jdbc.update("DELETE FROM ledger_invite WHERE created_by_user_id = ?", userId);
         jdbc.update("DELETE FROM idempotency_record WHERE user_id = ?", userId);
+        jdbc.update("UPDATE admin_operation_log SET target_uuid = NULL WHERE target_type = 'user_account' AND target_uuid = ?", userUuid);
         jdbc.update("DELETE FROM ledger_member WHERE user_id = ?", userId);
         jdbc.update("UPDATE ledger_person SET linked_user_id = NULL, avatar = '', version = version + 1 WHERE linked_user_id = ?", userId);
         jdbc.update("INSERT INTO account_session_revocation_queue (login_id) VALUES (?)", userId);
@@ -128,6 +134,15 @@ public class AdminAccountDeletionExecutor {
                 sessions.revoke(userId);
             }
         });
+    }
+
+    private List<Long> affectedLedgerIds(Long userId) {
+        return jdbc.queryForList("""
+                SELECT id FROM ledger WHERE owner_user_id = ?
+                UNION SELECT ledger_id FROM ledger_member WHERE user_id = ?
+                UNION SELECT ledger_id FROM ledger_person WHERE linked_user_id = ?
+                ORDER BY id
+                """, Long.class, userId, userId, userId);
     }
 
     private Map<String, String> validateSuccessors(AdminAccountDeletionPreviewResp preview,
@@ -160,7 +175,7 @@ public class AdminAccountDeletionExecutor {
         // Keep idempotency keys reserved: deleting a key could re-execute a prior write.
         jdbc.update("""
                 UPDATE idempotency_record SET response_code = -2, response_body = NULL
-                WHERE user_id <> ? AND response_code <> -1
+                WHERE user_id <> ?
                   AND CAST(response_body AS CHAR) LIKE ?
                 """, userId, "%" + userUuid + "%");
         List<AdminAccountDeletionPreviewResp.LedgerImpact> ledgers = new java.util.ArrayList<>(preview.getOwnedLedgers());
@@ -180,7 +195,7 @@ public class AdminAccountDeletionExecutor {
     private void invalidatePath(Long userId, String pattern) {
         jdbc.update("""
                 UPDATE idempotency_record SET response_code = -2, response_body = NULL
-                WHERE user_id <> ? AND response_code <> -1 AND request_path LIKE ?
+                WHERE user_id <> ? AND request_path LIKE ?
                 """, userId, pattern);
     }
 

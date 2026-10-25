@@ -35,7 +35,7 @@ public class AiBookkeepingController {
     }
 
     @PostMapping(value = "/transcribe", consumes = MediaType.APPLICATION_OCTET_STREAM_VALUE)
-    public Result<AiTranscriptionResp> transcribe(@PathVariable String ledgerUuid, @RequestBody byte[] pcm) {
-        return Result.ok(transcription.transcribe(ledgerUuid, pcm));
+    public Result<AiTranscriptionResp> transcribe(@PathVariable String ledgerUuid, jakarta.servlet.http.HttpServletRequest request) throws java.io.IOException {
+        return Result.ok(transcription.transcribeStream(ledgerUuid, request.getInputStream(), request.getContentLengthLong()));
     }
 }

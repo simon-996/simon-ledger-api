@@ -141,6 +141,7 @@ public class AdminAccountDeletionService {
             AdminAccountDeletionPreviewResp.Member active = new AdminAccountDeletionPreviewResp.Member();
             active.setUserUuid(user.getUuid());
             active.setNickname(user.getNickname());
+            active.setAccount(StringUtils.hasText(user.getEmail()) ? user.getEmail() : user.getPhone());
             active.setRole(member.getRole());
             impact.getActiveMembers().add(active);
             if (!Objects.equals(member.getUserId(), target.getId())

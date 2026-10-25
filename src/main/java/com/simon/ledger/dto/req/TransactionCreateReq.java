@@ -1,6 +1,7 @@
 package com.simon.ledger.dto.req;
 
 import jakarta.validation.constraints.DecimalMin;
+import jakarta.validation.constraints.Digits;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
@@ -21,6 +22,7 @@ public class TransactionCreateReq {
 
     @NotNull(message = "金额不能为空")
     @DecimalMin(value = "0.01", message = "金额必须大于 0")
+    @Digits(integer = 16, fraction = 2, message = "金额最多 16 位整数和 2 位小数")
     private BigDecimal amount;
 
     @NotBlank(message = "币种不能为空")

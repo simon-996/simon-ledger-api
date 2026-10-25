@@ -3,6 +3,7 @@ package com.simon.ledger.dto.resp;
 import lombok.Data;
 
 import java.math.BigDecimal;
+import java.util.Map;
 import java.time.LocalDateTime;
 import java.util.List;
 
@@ -16,6 +17,8 @@ public class LedgerResp {
     private String baseCurrencyCode;
 
     private BigDecimal exchangeRateToCny;
+
+    private Map<String, BigDecimal> currencyRatesToCny;
 
     private Integer version;
 

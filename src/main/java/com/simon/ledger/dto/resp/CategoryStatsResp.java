@@ -7,6 +7,8 @@ import java.math.BigDecimal;
 @Data
 public class CategoryStatsResp {
 
+    private String currencyCode = "CNY";
+
     private String category;
 
     private Integer type;

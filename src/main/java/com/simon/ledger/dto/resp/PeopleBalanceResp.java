@@ -7,6 +7,8 @@ import java.math.BigDecimal;
 @Data
 public class PeopleBalanceResp {
 
+    private String currencyCode = "CNY";
+
     private String personUuid;
 
     private String name;
